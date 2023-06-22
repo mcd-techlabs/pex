@@ -5,6 +5,8 @@ from __future__ import absolute_import
 
 import os.path
 import shutil
+import fnmatch
+import types
 
 from pex import hashing
 from pex.atomic_directory import atomic_directory
@@ -107,6 +109,35 @@ class ArtifactDownloader(object):
             if credentialed_url:
                 download_url = credentialed_url
                 break
+
+        url_parts = urlparse.urlsplit(url)
+        if fnmatch.fnmatch(url_parts.netloc, "*.s3*amazonaws.com"):
+            bucket, aws_netloc = url_parts.netloc.split(".", 1)
+            region = aws_netloc.split(".")[1] if aws_netloc.count(".") == 3 else ""
+            s3_object_key = url_parts.path[1:]
+
+            from botocore import auth, compat, credentials, session
+            session = session.get_session()
+            creds = credentials.create_credential_resolver(session).load_credentials()
+
+            # NB: The URL for auth is expected to be in path-style
+            path_style_url = "https://s3"
+            if region:
+                path_style_url += "." + region
+            path_style_url += ".amazonaws.com/" + bucket + "/" + s3_object_key
+            if url_parts.query:
+                path_style_url += "?" + url_parts.query
+
+            headers = compat.HTTPHeaders()
+            http_request = types.SimpleNamespace(
+                url=path_style_url,
+                headers=headers,
+                method="GET",
+                auth_path=None,
+            )
+            signer = auth.HmacV1QueryAuth(creds)
+            signer.add_auth(http_request)
+            url = http_request.url
 
         # Although we don't actually need to observe the download, we do need to patch Pip to not
         # care about wheel tags, environment markers or Requires-Python. The locker's download

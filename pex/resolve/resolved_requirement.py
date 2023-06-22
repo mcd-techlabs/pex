@@ -124,7 +124,7 @@ class ArtifactURL(object):
             )
         )
         normalized_url = urlparse.urlunparse(
-            url_info._replace(path=path, params="", query="", fragment="")
+            url_info._replace(path=path, params="", query=url_info.query, fragment="")
         )
         return cls(
             raw_url=url,
