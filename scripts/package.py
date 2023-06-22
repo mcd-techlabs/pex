@@ -53,6 +53,8 @@ def build_pex_pex(output_file: PurePath, verbosity: int = 0) -> None:
         "-c",
         "pex",
         pex_requirement,
+        # NB: The version is unimportant and can be bumped
+        "botocore-a-la-carte==1.29.158",
     ]
     subprocess.run(args, check=True)
 
