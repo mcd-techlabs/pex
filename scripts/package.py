@@ -53,6 +53,8 @@ def build_pex_pex(output_file: PurePath, local: bool = False, verbosity: int = 0
         "-c",
         "pex",
         pex_requirement,
+        # NB: The version is unimportant and can be bumped
+        "botocore-a-la-carte==1.29.158",
     ]
     if not local:
         args.extend(["--interpreter-constraint", python_requires()])
