@@ -11,6 +11,7 @@ import types
 from pex import hashing
 from pex.atomic_directory import atomic_directory
 from pex.common import safe_mkdir, safe_mkdtemp
+from pex.compatibility import url_unquote, urlparse
 from pex.hashing import Sha256
 from pex.jobs import Job, Raise, SpawnedJob, execute_parallel
 from pex.pip.download_observer import DownloadObserver
