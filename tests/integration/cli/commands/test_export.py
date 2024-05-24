@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -40,9 +40,7 @@ UNIVERSAL_ANSICOLORS = Lockfile(
     constraints=SortedTuple(),
     allow_prereleases=False,
     allow_wheels=True,
-    only_wheels=SortedTuple(),
     allow_builds=True,
-    only_builds=SortedTuple(),
     prefer_older_binary=False,
     use_pep517=None,
     build_isolation=True,

@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -13,7 +13,7 @@ from pex.resolve.locked_resolve import LockedRequirement
 from pex.resolve.lockfile import json_codec
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.path_mappings import PathMapping, PathMappings
-from pex.resolve.resolved_requirement import ArtifactURL, Pin
+from pex.resolve.resolved_requirement import Pin
 from pex.typing import TYPE_CHECKING
 from testing import make_env, run_pex_command
 from testing.cli import run_pex3
@@ -101,7 +101,7 @@ def test_find_links_create(
     ansicolors_requirement = expect_single_ansicolors_requirement(lock_file)
     assert 0 == len(ansicolors_requirement.additional_artifacts)
     assert (
-        ArtifactURL.parse("file:///re/mapped/ansicolors-1.1.8-py2.py3-none-any.whl")
+        "file:///re/mapped/ansicolors-1.1.8-py2.py3-none-any.whl"
         == ansicolors_requirement.artifact.url
     )
 

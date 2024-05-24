@@ -1,4 +1,4 @@
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import print_function
@@ -20,11 +20,8 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.skipif(
-    sys.version_info[:2] < (3, 7) or sys.version_info >= (3, 13),
-    reason=(
-        "This test needs to run Poetry which requires at least Python 3.7. Poetry also indirectly "
-        "depends on rpds-py (0.18.1 currently), which uses PyO3 which requires Python<3.13."
-    ),
+    sys.version_info[:2] < (3, 7),
+    reason="This test needs to run Poetry which requires at least Python 3.7",
 )
 def test_wheel_file_url_dep(tmpdir):
     # type: (Any) -> None

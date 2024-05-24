@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -8,13 +8,13 @@ from textwrap import dedent
 from pex.build_system import pep_518
 from pex.build_system.pep_518 import BuildSystem
 from pex.common import touch
+from pex.environment import PEXEnvironment
 from pex.pep_503 import ProjectName
 from pex.resolve.configured_resolver import ConfiguredResolver
 from pex.result import Error
 from pex.targets import LocalInterpreter
 from pex.typing import TYPE_CHECKING
 from pex.variables import ENV
-from pex.venv.virtualenv import Virtualenv
 
 if TYPE_CHECKING:
     from typing import Any, Optional, Union
@@ -68,15 +68,14 @@ def test_load_build_system_pyproject(
 
     build_system = load_build_system(pex_project_dir)
     assert isinstance(build_system, BuildSystem)
-    assert "pex_build.hatchling.build" == build_system.build_backend
+    assert "flit_core.buildapi" == build_system.build_backend
     dists = {
         dist.metadata.project_name
-        for dist in Virtualenv(build_system.venv_pex.venv_dir).iter_distributions()
+        for dist in PEXEnvironment.mount(build_system.venv_pex.pex).resolve()
     }
-    assert ProjectName("hatchling") in dists
+    assert ProjectName("flit_core") in dists
     subprocess.check_call(
-        args=[build_system.venv_pex.pex, "-c", "import {}".format(build_system.build_backend)],
-        env=build_system.env,
+        args=[build_system.venv_pex.pex, "-c", "import {}".format(build_system.build_backend)]
     )
 
 

@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -20,6 +20,7 @@ from pex.orderedset import OrderedSet
 from pex.pep_503 import ProjectName
 from pex.pip.download_observer import DownloadObserver
 from pex.pip.tool import PackageIndexConfiguration
+from pex.pip.version import PipVersion
 from pex.resolve import lock_resolver, locker, resolvers
 from pex.resolve.configured_resolver import ConfiguredResolver
 from pex.resolve.downloads import ArtifactDownloader
@@ -154,10 +155,10 @@ def _prepare_project_directory(build_request):
         return target, project
 
     extract_dir = os.path.join(safe_mkdtemp(), "project")
-    if FileArtifact.is_zip_sdist(project):
+    if project.endswith(".zip"):
         with open_zip(project) as zf:
             zf.extractall(extract_dir)
-    elif FileArtifact.is_tar_sdist(project):
+    elif project.endswith(".tar.gz"):
         with tarfile.open(project) as tf:
             tf.extractall(extract_dir)
     else:
@@ -331,7 +332,6 @@ class LockObserver(ResolveObserver):
                 dist_metadatas=dist_metadatas_by_target[target],
                 fingerprinter=ArtifactDownloader(
                     resolver=self.resolver,
-                    lock_configuration=self.lock_configuration,
                     target=target,
                     package_index_configuration=self.package_index_configuration,
                     max_parallel_jobs=self.max_parallel_jobs,
@@ -356,7 +356,7 @@ def create(
     network_configuration = pip_configuration.network_configuration
     parsed_requirements = tuple(requirement_configuration.parse_requirements(network_configuration))
     constraints = tuple(
-        parsed_constraint.requirement.as_constraint()
+        parsed_constraint.requirement
         for parsed_constraint in requirement_configuration.parse_constraints(network_configuration)
     )
 
@@ -379,7 +379,9 @@ def create(
         resolver=configured_resolver,
         wheel_builder=WheelBuilder(
             package_index_configuration=package_index_configuration,
-            build_configuration=pip_configuration.build_configuration,
+            prefer_older_binary=pip_configuration.prefer_older_binary,
+            use_pep517=pip_configuration.use_pep517,
+            build_isolation=pip_configuration.build_isolation,
             pip_version=pip_configuration.version,
             resolver=configured_resolver,
         ),
@@ -409,7 +411,11 @@ def create(
             resolver_version=pip_configuration.resolver_version,
             network_configuration=network_configuration,
             password_entries=pip_configuration.repos_configuration.password_entries,
-            build_configuration=pip_configuration.build_configuration,
+            build=pip_configuration.allow_builds,
+            use_wheel=pip_configuration.allow_wheels,
+            prefer_older_binary=pip_configuration.prefer_older_binary,
+            use_pep517=pip_configuration.use_pep517,
+            build_isolation=pip_configuration.build_isolation,
             max_parallel_jobs=pip_configuration.max_jobs,
             observer=lock_observer,
             dest=download_dir,
@@ -440,7 +446,11 @@ def create(
         requirements=parsed_requirements,
         constraints=constraints,
         allow_prereleases=pip_configuration.allow_prereleases,
-        build_configuration=pip_configuration.build_configuration,
+        allow_wheels=pip_configuration.allow_wheels,
+        allow_builds=pip_configuration.allow_builds,
+        prefer_older_binary=pip_configuration.prefer_older_binary,
+        use_pep517=pip_configuration.use_pep517,
+        build_isolation=pip_configuration.build_isolation,
         transitive=pip_configuration.transitive,
         locked_resolves=locked_resolves,
     )
@@ -466,7 +476,11 @@ def create(
                     resolver_version=pip_configuration.resolver_version,
                     network_configuration=network_configuration,
                     password_entries=pip_configuration.repos_configuration.password_entries,
-                    build_configuration=pip_configuration.build_configuration,
+                    build=pip_configuration.allow_builds,
+                    use_wheel=pip_configuration.allow_wheels,
+                    prefer_older_binary=pip_configuration.prefer_older_binary,
+                    use_pep517=pip_configuration.use_pep517,
+                    build_isolation=pip_configuration.build_isolation,
                     transitive=pip_configuration.transitive,
                     max_parallel_jobs=pip_configuration.max_jobs,
                     pip_version=pip_configuration.version,

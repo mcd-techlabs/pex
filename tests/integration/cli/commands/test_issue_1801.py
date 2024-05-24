@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -29,25 +29,16 @@ def test_preserve_pip_download_log():
     expected_algorithm = "sha256"
     expected_hash = "00d2dde5a675579325902536738dd27e4fac1fd68f773fe36c21044eb559e187"
     with open(log_path) as fp:
-        log_text = fp.read()
-
-    assert re.search(
         # N.B.: Modern Pip excludes hashes from logged URLs when the index serves up PEP-691 json
         # responses.
-        r"Added ansicolors==1\.1\.8 from https?://\S+/{url_suffix}(?:#{algorithm}={hash})? to build tracker".format(
-            url_suffix=re.escape(expected_url_suffix),
-            algorithm=re.escape(expected_algorithm),
-            hash=re.escape(expected_hash),
-        ),
-        log_text,
-    ) or re.search(
-        # N.B.: Even more modern Pip does not log "Added ... to build tracker" lines for pre-built
-        # wheels; so we look for an alternate expected log line.
-        r"Looking up \"https?://\S+/{url_suffix}\" in the cache".format(
-            url_suffix=re.escape(expected_url_suffix),
-        ),
-        log_text,
-    )
+        assert re.search(
+            r"Added ansicolors==1\.1\.8 from https?://\S+/{url_suffix}(?:#{algorithm}={hash})? to build tracker".format(
+                url_suffix=re.escape(expected_url_suffix),
+                algorithm=re.escape(expected_algorithm),
+                hash=re.escape(expected_hash),
+            ),
+            fp.read(),
+        )
 
     lockfile = json_codec.loads(result.output)
     assert 1 == len(lockfile.locked_resolves)
@@ -60,7 +51,7 @@ def test_preserve_pip_download_log():
     assert 1 == len(artifacts)
 
     artifact = artifacts[0]
-    assert artifact.url.download_url.endswith(expected_url_suffix)
+    assert artifact.url.endswith(expected_url_suffix)
     assert expected_algorithm == artifact.fingerprint.algorithm
     assert expected_hash == artifact.fingerprint.hash
 

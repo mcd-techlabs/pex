@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -17,7 +17,7 @@ from pex.common import (
     Chroot,
     chmod_plus_x,
     deterministic_walk,
-    is_pyc_file,
+    filter_pyc_files,
     is_pyc_temporary_file,
     safe_copy,
     safe_delete,
@@ -27,8 +27,9 @@ from pex.common import (
 )
 from pex.compatibility import commonpath, to_bytes
 from pex.compiler import Compiler
-from pex.dist_metadata import Distribution, DistributionType, MetadataError
+from pex.dist_metadata import Distribution, MetadataError
 from pex.enum import Enum
+from pex.environment import PEXEnvironment
 from pex.finders import get_entry_point_from_console_script, get_script_from_distributions
 from pex.interpreter import PythonInterpreter
 from pex.layout import Layout
@@ -127,50 +128,50 @@ __INSTALLED_FROM__ = '__PEX_EXE__'
 
 
 def __re_exec__(argv0, *extra_launch_args):
-    os.execv(argv0, [argv0] + list(extra_launch_args) + sys.argv[1:])
+  os.execv(argv0, [argv0] + list(extra_launch_args) + sys.argv[1:])
 
 
 __execute__ = __name__ == "__main__"
 
-def __ensure_pex_installed__(pex, pex_root, pex_hash):
-    from pex.layout import ensure_installed
-    from pex.tracer import TRACER
+def __maybe_install_pex__(pex, pex_root, pex_hash):
+  from pex.layout import maybe_install
+  from pex.tracer import TRACER
 
-    installed_location = ensure_installed(pex, pex_root, pex_hash)
-    if not __execute__ or pex == installed_location:
-        return installed_location
+  installed_location = maybe_install(pex, pex_root, pex_hash)
+  if not __execute__ or not installed_location:
+    return installed_location
 
-    # N.B.: This is read upon re-exec below to point sys.argv[0] back to the original pex before
-    # unconditionally scrubbing the env var and handing off to user code.
-    os.environ[__INSTALLED_FROM__] = pex
+  # N.B.: This is read upon re-exec below to point sys.argv[0] back to the original pex before
+  # unconditionally scrubbing the env var and handing off to user code.
+  os.environ[__INSTALLED_FROM__] = pex
 
-    TRACER.log('Executing installed PEX for {{}} at {{}}'.format(pex, installed_location))
-    __re_exec__(sys.executable, installed_location)
+  TRACER.log('Executing installed PEX for {{}} at {{}}'.format(pex, installed_location))
+  __re_exec__(sys.executable, installed_location)
 
 
 def __maybe_run_venv__(pex, pex_root, pex_path):
-    from pex.common import is_exe
-    from pex.tracer import TRACER
-    from pex.variables import venv_dir
+  from pex.common import is_exe
+  from pex.tracer import TRACER
+  from pex.variables import venv_dir
 
-    venv_dir = venv_dir(
-        pex_file=pex,
-        pex_root=pex_root,
-        pex_hash={pex_hash!r},
-        has_interpreter_constraints={has_interpreter_constraints!r},
-        pex_path=pex_path,
-    )
-    venv_pex = os.path.join(venv_dir, 'pex')
-    if not __execute__ or not is_exe(venv_pex):
-        # Code in bootstrap_pex will (re)create the venv after selecting the correct interpreter.
-        return venv_dir
+  venv_dir = venv_dir(
+    pex_file=pex,
+    pex_root=pex_root, 
+    pex_hash={pex_hash!r},
+    has_interpreter_constraints={has_interpreter_constraints!r},
+    pex_path=pex_path,
+  )
+  venv_pex = os.path.join(venv_dir, 'pex')
+  if not __execute__ or not is_exe(venv_pex):
+    # Code in bootstrap_pex will (re)create the venv after selecting the correct interpreter. 
+    return venv_dir
 
-    TRACER.log('Executing venv PEX for {{}} at {{}}'.format(pex, venv_pex))
-    venv_python = os.path.join(venv_dir, 'bin', 'python')
-    if {hermetic_venv_scripts!r}:
-        __re_exec__(venv_python, '-sE', venv_pex)
-    else:
-        __re_exec__(venv_python, venv_pex)
+  TRACER.log('Executing venv PEX for {{}} at {{}}'.format(pex, venv_pex))
+  venv_python = os.path.join(venv_dir, 'bin', 'python')
+  if {hermetic_venv_scripts!r}:
+    __re_exec__(venv_python, '-sE', venv_pex)
+  else:
+    __re_exec__(venv_python, venv_pex)
 
 
 def __entry_point_from_filename__(filename):
@@ -184,19 +185,19 @@ def __entry_point_from_filename__(filename):
 
 __entry_point__ = None
 if '__file__' in locals() and __file__ is not None and os.path.exists(__file__):
-    __entry_point__ = __entry_point_from_filename__(__file__)
+  __entry_point__ = __entry_point_from_filename__(__file__)
 elif '__loader__' in locals():
-    if hasattr(__loader__, 'archive'):
-        __entry_point__ = __loader__.archive
-    elif hasattr(__loader__, 'get_filename'):
-        # The source of the loader interface has changed over the course of Python history from
-        # `pkgutil.ImpLoader` to `importlib.abc.Loader`, but the existence and semantics of
-        # `get_filename` has remained constant; so we just check for the method.
-        __entry_point__ = __entry_point_from_filename__(__loader__.get_filename())
+  if hasattr(__loader__, 'archive'):
+    __entry_point__ = __loader__.archive
+  elif hasattr(__loader__, 'get_filename'):
+    # The source of the loader interface has changed over the course of Python history from
+    # `pkgutil.ImpLoader` to `importlib.abc.Loader`, but the existence and semantics of
+    # `get_filename` has remained constant; so we just check for the method.
+    __entry_point__ = __entry_point_from_filename__(__loader__.get_filename())
 
 if __entry_point__ is None:
-    sys.stderr.write('Could not launch python executable!\\n')
-    sys.exit(2)
+  sys.stderr.write('Could not launch python executable!\\n')
+  sys.exit(2)
 
 __installed_from__ = os.environ.pop(__INSTALLED_FROM__, None)
 sys.argv[0] = __installed_from__ or sys.argv[0]
@@ -210,14 +211,16 @@ if not __installed_from__:
     from pex.variables import ENV, Variables
     __pex_root__ = Variables.PEX_ROOT.value_or(ENV, {pex_root!r})
     if not ENV.PEX_TOOLS and Variables.PEX_VENV.value_or(ENV, {is_venv!r}):
-        __venv_dir__ = __maybe_run_venv__(
-            __entry_point__,
-            pex_root=__pex_root__,
-            pex_path=ENV.PEX_PATH or {pex_path!r},
-        )
-    __entry_point__ = __ensure_pex_installed__(
-        __entry_point__, pex_root=__pex_root__, pex_hash={pex_hash!r}
+      __venv_dir__ = __maybe_run_venv__(
+        __entry_point__,
+        pex_root=__pex_root__,
+        pex_path=ENV.PEX_PATH or {pex_path!r},
+      )
+    __installed_location__ = __maybe_install_pex__(
+      __entry_point__, pex_root=__pex_root__, pex_hash={pex_hash!r}
     )
+    if __installed_location__:
+      __entry_point__ = __installed_location__
 else:
     os.environ['PEX'] = os.path.realpath(__installed_from__)
 
@@ -371,6 +374,21 @@ class PEXBuilder(object):
         self._ensure_unfrozen("Adding a requirement")
         self._pex_info.add_requirement(req)
 
+    def add_from_requirements_pex(self, pex):
+        """Add requirements from an existing pex.
+
+        :param pex: The path to an existing .pex file or unzipped pex directory.
+        """
+        self._ensure_unfrozen("Adding from pex")
+        pex_info = PexInfo.from_pex(pex)
+        pex_environment = PEXEnvironment.mount(pex, pex_info=pex_info)
+        for fingerprinted_dist in pex_environment.iter_distributions():
+            self.add_distribution(
+                dist=fingerprinted_dist.distribution, fingerprint=fingerprinted_dist.fingerprint
+            )
+        for requirement in pex_info.requirements:
+            self.add_requirement(requirement)
+
     def set_executable(self, filename, env_filename=None):
         """Set the executable for this environment.
 
@@ -455,11 +473,6 @@ class PEXBuilder(object):
         self._ensure_unfrozen("Setting an entry point")
         self._pex_info.entry_point = entry_point
 
-    @property
-    def shebang(self):
-        # type: () -> str
-        return self._shebang
-
     def set_shebang(self, shebang):
         """Set the exact shebang line for the PEX file.
 
@@ -488,22 +501,10 @@ class PEXBuilder(object):
         """
         self._header = header
 
-    def _add_dist(
-        self,
-        path,  # type: str
-        dist_name,  # type: str
-        fingerprint=None,  # type: Optional[str]
-        is_wheel_file=False,  # type: bool
-    ):
+    def _add_dist_dir(self, path, dist_name, fingerprint=None):
         target_dir = os.path.join(self._pex_info.internal_cache, dist_name)
-        if self._copy_mode is CopyMode.SYMLINK or is_wheel_file:
-            self._copy_or_link(
-                path,
-                target_dir,
-                label=dist_name,
-                compress=not is_wheel_file,
-                copy_mode=CopyMode.LINK if is_wheel_file else None,
-            )
+        if self._copy_mode == CopyMode.SYMLINK:
+            self._copy_or_link(path, target_dir, label=dist_name)
         else:
             for root, _, files in os.walk(path):
                 for f in files:
@@ -511,9 +512,7 @@ class PEXBuilder(object):
                     relpath = os.path.relpath(filename, path)
                     target = os.path.join(target_dir, relpath)
                     self._copy_or_link(filename, target, label=dist_name)
-        return fingerprint or (
-            CacheHelper.hash(path) if is_wheel_file else CacheHelper.dir_hash(path)
-        )
+        return fingerprint or CacheHelper.dir_hash(path)
 
     def add_distribution(
         self,
@@ -535,17 +534,12 @@ class PEXBuilder(object):
         dist_name = os.path.basename(dist.location)
         self._distributions[dist.location] = dist
 
-        if dist.type not in (DistributionType.WHEEL, DistributionType.INSTALLED):
+        if not os.path.isdir(dist.location):
             raise self.InvalidDistribution(
-                "Unsupported distribution type: {}, pex can only accept wheel files and dist "
+                "Unsupported distribution type: {}, pex can only accept dist "
                 "dirs (installed wheels).".format(dist)
             )
-        dist_hash = self._add_dist(
-            dist.location,
-            dist_name,
-            fingerprint=fingerprint,
-            is_wheel_file=dist.type is DistributionType.WHEEL,
-        )
+        dist_hash = self._add_dist_dir(dist.location, dist_name, fingerprint=fingerprint)
 
         # add dependency key so that it can rapidly be retrieved from cache
         self._pex_info.add_distribution(dist_name, dist_hash)
@@ -616,23 +610,15 @@ class PEXBuilder(object):
             label="importhook",
         )
 
-    def _copy_or_link(
-        self,
-        src,  # type: Optional[str]
-        dst,  # type: str
-        label=None,  # type: Optional[str]
-        compress=True,  # type: bool
-        copy_mode=None,  # type: Optional[CopyMode.Value]
-    ):
-        copy_mode = copy_mode or self._copy_mode
+    def _copy_or_link(self, src, dst, label=None):
         if src is None:
             self._chroot.touch(dst, label)
-        elif copy_mode is CopyMode.COPY:
-            self._chroot.copy(src, dst, label, compress)
-        elif copy_mode is CopyMode.SYMLINK:
-            self._chroot.symlink(src, dst, label, compress)
+        elif self._copy_mode == CopyMode.COPY:
+            self._chroot.copy(src, dst, label)
+        elif self._copy_mode == CopyMode.SYMLINK:
+            self._chroot.symlink(src, dst, label)
         else:
-            self._chroot.link(src, dst, label, compress)
+            self._chroot.link(src, dst, label)
 
     def _prepare_bootstrap(self):
         from . import vendor
@@ -641,11 +627,20 @@ class PEXBuilder(object):
         # although we don't use pyparsing directly, packaging.markers, which we
         # do use at runtime, does.
         root_module_names = ["attr", "packaging", "pkg_resources", "pyparsing"]
+        include_dist_info = set()
+        if self._pex_info.includes_tools:
+            # The `repository extract` tool needs setuptools and wheel to build sdists and wheels
+            # and distutils needs .dist-info to discover setuptools (and wheel).
+            for project in "setuptools", "wheel":
+                root_module_names.append(project)
+                include_dist_info.add(project)
+
         prepared_sources = vendor.vendor_runtime(
             chroot=self._chroot,
             dest_basedir=self._pex_info.bootstrap,
             label="bootstrap",
             root_module_names=root_module_names,
+            include_dist_info=include_dist_info,
         )
 
         bootstrap_digest = hashlib.sha1()
@@ -656,9 +651,7 @@ class PEXBuilder(object):
             if root == _ABS_PEX_PACKAGE_DIR:
                 dirs[:] = bootstrap_packages
 
-            for f in files:
-                if is_pyc_file(f):
-                    continue
+            for f in filter_pyc_files(files):
                 abs_src = os.path.join(root, f)
                 # N.B.: Some of the `pex.*` package files (__init__.py) will already have been
                 # prepared when vendoring the runtime above; so we skip them here.
@@ -810,17 +803,16 @@ class PEXBuilder(object):
         cached_bootstrap_zip_dir = zip_cache_dir(
             os.path.join(pex_info.pex_root, "bootstrap_zips", bootstrap_hash)
         )
-        with TRACER.timed("Zipping PEX .bootstrap/ code."):
-            with atomic_directory(cached_bootstrap_zip_dir) as atomic_bootstrap_zip_dir:
-                if not atomic_bootstrap_zip_dir.is_finalized():
-                    self._chroot.zip(
-                        os.path.join(atomic_bootstrap_zip_dir.work_dir, pex_info.bootstrap),
-                        deterministic_timestamp=deterministic_timestamp,
-                        exclude_file=is_pyc_temporary_file,
-                        strip_prefix=pex_info.bootstrap,
-                        labels=("bootstrap",),
-                        compress=compress,
-                    )
+        with atomic_directory(cached_bootstrap_zip_dir) as atomic_bootstrap_zip_dir:
+            if not atomic_bootstrap_zip_dir.is_finalized():
+                self._chroot.zip(
+                    os.path.join(atomic_bootstrap_zip_dir.work_dir, pex_info.bootstrap),
+                    deterministic_timestamp=deterministic_timestamp,
+                    exclude_file=is_pyc_temporary_file,
+                    strip_prefix=pex_info.bootstrap,
+                    labels=("bootstrap",),
+                    compress=compress,
+                )
         safe_copy(
             os.path.join(cached_bootstrap_zip_dir, pex_info.bootstrap),
             os.path.join(dirname, pex_info.bootstrap),
@@ -831,32 +823,24 @@ class PEXBuilder(object):
         if pex_info.distributions:
             internal_cache = os.path.join(dirname, pex_info.internal_cache)
             os.mkdir(internal_cache)
-            with TRACER.timed(
-                "{action} {count} distributions.".format(
-                    action="Copying" if pex_info.deps_are_wheel_files else "Zipping",
-                    count=len(pex_info.distributions),
+            for location, fingerprint in pex_info.distributions.items():
+                cached_installed_wheel_zip_dir = zip_cache_dir(
+                    os.path.join(pex_info.pex_root, "packed_wheels", fingerprint)
                 )
-            ):
-                for location, fingerprint in pex_info.distributions.items():
-                    dest = os.path.join(internal_cache, location)
-                    if pex_info.deps_are_wheel_files:
-                        for path in self._chroot.filesets[location]:
-                            safe_copy(os.path.join(self._chroot.chroot, path), dest)
-                    else:
-                        cached_installed_wheel_zip_dir = zip_cache_dir(
-                            os.path.join(pex_info.pex_root, "packed_wheels", fingerprint)
+                with atomic_directory(cached_installed_wheel_zip_dir) as atomic_zip_dir:
+                    if not atomic_zip_dir.is_finalized():
+                        self._chroot.zip(
+                            os.path.join(atomic_zip_dir.work_dir, location),
+                            deterministic_timestamp=deterministic_timestamp,
+                            exclude_file=is_pyc_temporary_file,
+                            strip_prefix=os.path.join(pex_info.internal_cache, location),
+                            labels=(location,),
+                            compress=compress,
                         )
-                        with atomic_directory(cached_installed_wheel_zip_dir) as atomic_zip_dir:
-                            if not atomic_zip_dir.is_finalized():
-                                self._chroot.zip(
-                                    os.path.join(atomic_zip_dir.work_dir, location),
-                                    deterministic_timestamp=deterministic_timestamp,
-                                    exclude_file=is_pyc_temporary_file,
-                                    strip_prefix=os.path.join(pex_info.internal_cache, location),
-                                    labels=(location,),
-                                    compress=compress,
-                                )
-                        safe_copy(os.path.join(cached_installed_wheel_zip_dir, location), dest)
+                safe_copy(
+                    os.path.join(cached_installed_wheel_zip_dir, location),
+                    os.path.join(internal_cache, location),
+                )
 
     def _build_zipapp(
         self,

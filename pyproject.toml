@@ -1,45 +1,13 @@
 [build-system]
-# N.B.: We use an in-tree backend just to get our hatchling in-tree plugins visible without having
-# to publish a plugin distribution. The real backend is `hatchling.build` and the
-# `pex_build.hatchling.build` backend is a very thin wrapper that just serves to expose our hook
-# entry point metadata so the hook is discovered.
-backend-path = ["build-backend"]
-build-backend = "pex_build.hatchling.build"
+requires = ["flit_core>=2,<4"]
+build-backend = "flit_core.buildapi"
 
-# The hatchling 1.22.0 release breaks our build in several ways:
-# + Our console scripts are no longer generated.
-# + The `project.readme` pyproject.toml key now has its value hydrated before our metadata plugin
-#   runs, which foils our metadata expansion since our README.rst contains inadvertant expansion
-#   tokens.
-# This pin low buys time to work through the issues.
-requires = ["hatchling"]
-
-[tool.hatch.metadata.hooks.pex-adjust-metadata]
-expand = {"pex_version" = "version"}
-
-[tool.hatch.metadata.hooks.pex-adjust-metadata.project]
-requires-python = ">=2.7,<3.13,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*"
-
-[tool.hatch.metadata.hooks.pex-adjust-metadata.project.urls]
-Changelog = "https://github.com/pex-tool/pex/blob/v{pex_version}/CHANGES.md"
-Documentation = "https://docs.pex-tool.org/"
-Download = "https://github.com/pex-tool/pex/releases/download/v{pex_version}/pex"
-Homepage = "https://github.com/pex-tool/pex"
-Source = "https://github.com/pex-tool/pex/tree/v{pex_version}"
-
-[tool.hatch.build.targets.wheel.hooks.pex-adjust-build]
-# We need this empty table to enable our hook.
-
-[project]
-name = "pex"
-dynamic = ["version", "requires-python", "urls"]
-authors = [
-  {name = "The PEX developers", email="developers@pex-tool.org"}
-]
-description = "The PEX packaging toolchain."
-readme = "README.rst"
-license-files = { paths = ["LICENSE"] }
-keywords = ["package", "executable", "virtualenv", "lock", "freeze"]
+[tool.flit.metadata]
+module = "pex"
+author = "The PEX developers"
+author-email = "pantsbuild@gmail.com"
+home-page = "https://github.com/pantsbuild/pex"
+description-file = "README.rst"
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
@@ -66,23 +34,27 @@ classifiers = [
   "Topic :: System :: Software Distribution",
   "Topic :: Utilities",
 ]
+requires-python = ">=2.7,<3.13,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*"
 
-[project.optional-dependencies]
-subprocess = [
-  "subprocess32>=3.2.7; python_version < '3'"
-]
+[tool.flit.metadata.requires-extra]
+# For improved subprocess robustness under python2.7.
+subprocess = ["subprocess32>=3.2.7; python_version<'3'"]
 
-[project.scripts]
+[tool.flit.scripts]
 pex = "pex.bin.pex:main"
 pex3 = "pex.cli.pex:main"
 pex-tools = "pex.tools.main:main"
 
-[project.entry-points."distutils.commands"]
+[tool.flit.entrypoints."distutils.commands"]
+# Make bdist_pex available for folks who install the pex distribution.
 bdist_pex = "pex.distutils.commands.bdist_pex:bdist_pex"
 
-[tool.hatch.version]
-path = "pex/version.py"
-pattern = '__version__ = "(?P<version>[^"]+)"'
+[tool.flit.sdist]
+include = ["CHANGES.md"]
+
+[tool.flit.metadata.urls]
+Changelog = "https://github.com/pantsbuild/pex/blob/main/CHANGES.md"
+Documentation = "https://pex.readthedocs.io/en/latest/"
 
 [tool.black]
 line-length = 100

@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -7,8 +7,9 @@ from textwrap import dedent
 
 import pytest
 
+from pex.common import temporary_dir
 from pex.typing import TYPE_CHECKING
-from testing import built_wheel, run_pex_command, run_simple_pex
+from testing import built_wheel, make_env, run_pex_command, run_simple_pex
 
 if TYPE_CHECKING:
     from typing import Any
@@ -44,11 +45,8 @@ def test_resolve_arbitrary_equality(tmpdir):
         verify=False,
         python_requires=">=2.7,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*",
     ) as whl:
-        pex_root = os.path.join(str(tmpdir), "pex_root")
         pex_file = os.path.join(str(tmpdir), "pex")
-        results = run_pex_command(
-            args=["-o", pex_file, "--pex-root", pex_root, "--runtime-pex-root", pex_root, whl]
-        )
+        results = run_pex_command(args=["-o", pex_file, whl])
         results.assert_success()
 
         output, returncode = run_simple_pex(pex_file, args=["-c", "import foo"])

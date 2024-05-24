@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import filecmp
@@ -13,6 +13,7 @@ import colors
 import pytest
 
 from pex.common import safe_open
+from pex.compatibility import urlparse
 from pex.resolve.locked_resolve import VCSArtifact
 from pex.resolve.lockfile import json_codec
 from pex.typing import TYPE_CHECKING
@@ -122,9 +123,6 @@ def test_vcs_equivalence(test_tool):
     )
 
     assert lock1 != lock2, "Expected two different lock files."
-    assert json_codec.load(lock1) == json_codec.load(
-        lock2
-    ), "Expected both lock files to be equivalent."
 
     def extract_single_vcs_artifact(lock):
         # type: (str) -> VCSArtifact
@@ -147,11 +145,11 @@ def test_vcs_equivalence(test_tool):
         "We expect locking using a direct reference requirement or a Pip proprietary VCS "
         "requirement for the same VCS revision will produce the same locked VCS archive"
     )
-    assert vcs_artifact1.url == vcs_artifact2.url, "Expected the same artifact lock URLs."
-    assert not vcs_artifact1.url.fragment_parameters
-    assert {"egg": ["ansicolors"]} == {
-        name: list(values) for name, values in vcs_artifact2.url.fragment_parameters.items()
-    }
+    assert vcs_artifact1.url != vcs_artifact2.url, "Expected two different lock URLs."
+    assert "" == urlparse.urlparse(vcs_artifact1.url).fragment
+    assert {"egg": ["ansicolors"]} == urlparse.parse_qs(
+        urlparse.urlparse(vcs_artifact2.url).fragment
+    )
 
 
 @pytest.mark.skipif(sys.version_info[:2] < (3, 6), reason="The library under test uses f-strings.")

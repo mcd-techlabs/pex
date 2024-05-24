@@ -1,4 +1,4 @@
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -21,7 +21,7 @@ def test_read_only_venv(
 
     venv_dir = os.path.join(str(tmpdir), "venv")
     venv = Virtualenv.create(venv_dir)
-    venv.install_pip(upgrade=True)
+    venv.install_pip()
     subprocess.check_call(args=[venv.bin_path("pip"), "install", pex_project_dir])
 
     pex_root = os.path.join(str(tmpdir), "pex_root")

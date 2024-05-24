@@ -1,4 +1,4 @@
-# Copyright 2018 Pex project contributors.
+# Copyright 2018 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -9,14 +9,12 @@ import subprocess
 import sys
 from textwrap import dedent
 
-from pex.common import Chroot, is_pyc_dir, is_pyc_file, safe_mkdtemp, touch
+from pex.common import Chroot, filter_pyc_dirs, filter_pyc_files, safe_mkdtemp, touch
 from pex.tracer import TRACER
 from pex.typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Iterable, Iterator, Optional, Sequence, Set, Text, Tuple, Union
-
-    from pex.interpreter import PythonInterpreter
+    from typing import Iterable, Iterator, Optional, Sequence, Set, Text, Tuple
 
 _PACKAGE_COMPONENTS = __name__.split(".")
 
@@ -86,7 +84,7 @@ class VendorSpec(
         rewrite=True,  # type: bool
         constraints=(),  # type: Tuple[str, ...]
     ):
-        requirement = "{project_name} @ git+{repo}@{commit}".format(
+        requirement = "git+{repo}@{commit}#egg={project_name}".format(
             repo=repo, commit=commit, project_name=project_name
         )
         if not prep_command:
@@ -138,7 +136,7 @@ class VendorSpec(
     def create_packages(self):
         """Create missing packages joining the vendor root to the base of the vendored distribution.
 
-        For example, given a root at ``/home/jake/dev/pex-tool/pex`` and a vendored distribution
+        For example, given a root at ``/home/jake/dev/pantsbuild/pex`` and a vendored distribution
         at ``pex/vendor/_vendored/requests`` this method would create the following package files::
 
           pex/vendor/_vendored/__init__.py
@@ -149,7 +147,7 @@ class VendorSpec(
         :class:`pex.third_party.VendorImporter`.
         """
         if not self.rewrite:
-            # The extra package structure is only required by Pex for vendored code used via import
+            # The extra package structure is only required for vendored code used via import
             # rewrites.
             return
 
@@ -158,22 +156,12 @@ class VendorSpec(
             touch(os.path.join(self.ROOT, *relpath))
 
 
-def iter_vendor_specs(filter_requires_python=None):
-    # type: (Optional[Union[Tuple[int, int], PythonInterpreter]]) -> Iterator[VendorSpec]
+def iter_vendor_specs(filter_requires_python=False):
+    # type: (bool) -> Iterator[VendorSpec]
     """Iterate specifications for code vendored by pex.
 
-    :param filter_requires_python: An optional interpreter (or its major and minor version) to
-                                   tailor the vendor specs to.
     :return: An iterator over specs of all vendored code.
     """
-    python_major_minor = None  # type: Optional[Tuple[int, int]]
-    if filter_requires_python:
-        python_major_minor = (
-            filter_requires_python
-            if isinstance(filter_requires_python, tuple)
-            else filter_requires_python.version[:2]
-        )
-
     # We use this for a better @dataclass that is also Python2.7 and PyPy compatible.
     # N.B.: The `[testenv:typecheck]` section in `tox.ini` should have its deps list updated to
     # reflect this attrs version.
@@ -187,18 +175,18 @@ def iter_vendor_specs(filter_requires_python=None):
 
     # We use this via pex.third_party at runtime to check for compatible wheel tags and at build
     # time to implement resolving distributions from a PEX repository.
-    if not python_major_minor or python_major_minor < (3, 6):
+    if not filter_requires_python or sys.version_info[:2] < (3, 6):
         # N.B.: The pyparsing constraint is needed for 2.7 support.
         yield VendorSpec.pinned(
             "packaging", "20.9", import_path="packaging_20_9", constraints=("pyparsing<3",)
         )
-    if not python_major_minor or python_major_minor == (3, 6):
+    if not filter_requires_python or sys.version_info[:2] == (3, 6):
         # N.B.: The pyparsing constraint is needed because our import re-writer (RedBaron) chokes on
         # newer versions.
         yield VendorSpec.pinned(
             "packaging", "21.3", import_path="packaging_21_3", constraints=("pyparsing<3",)
         )
-    if not python_major_minor or python_major_minor >= (3, 7):
+    if not filter_requires_python or sys.version_info[:2] >= (3, 7):
         yield VendorSpec.pinned("packaging", "23.1", import_path="packaging_23_1")
 
     # We use toml to read pyproject.toml when building sdists from local source projects.
@@ -206,19 +194,19 @@ def iter_vendor_specs(filter_requires_python=None):
 
     # We shell out to pip at buildtime to resolve and install dependencies.
     # N.B.: We're currently using a patched version of Pip 20.3.4 housed at
-    # https://github.com/pex-tool/pip/tree/pex/patches/generation-2.
+    # https://github.com/pantsbuild/pip/tree/pex/patches/generation-2.
     # It has 2 patches:
-    # 1.) https://github.com/pex-tool/pip/commit/06f462537c981116c763c1ba40cf40e9dd461bcf
+    # 1.) https://github.com/pantsbuild/pip/commit/06f462537c981116c763c1ba40cf40e9dd461bcf
     #     The patch works around a bug in `pip download --constraint...` tracked at
     #     https://github.com/pypa/pip/issues/9283 and fixed by https://github.com/pypa/pip/pull/9301
-    #     there and https://github.com/pex-tool/pip/pull/8 in our fork.
-    # 2.) https://github.com/pex-tool/pip/commit/386a54f097ece66775d0c7f34fd29bb596c6b0be
+    #     there and https://github.com/pantsbuild/pip/pull/8 in our fork.
+    # 2.) https://github.com/pantsbuild/pip/commit/386a54f097ece66775d0c7f34fd29bb596c6b0be
     #     This is a cherry-pick of
-    #     https://github.com/pex-tool/pip/commit/00fb5a0b224cde08e3e5ca034247baadfb646468
+    #     https://github.com/pantsbuild/pip/commit/00fb5a0b224cde08e3e5ca034247baadfb646468
     #     (https://github.com/pypa/pip/pull/9533) from upstream that upgrades Pip's vendored
     #     packaging to 20.9 to pick up support for mac universal2 wheels.
     yield VendorSpec.git(
-        repo="https://github.com/pex-tool/pip",
+        repo="https://github.com/pantsbuild/pip",
         commit="386a54f097ece66775d0c7f34fd29bb596c6b0be",
         project_name="pip",
         rewrite=False,
@@ -228,10 +216,10 @@ def iter_vendor_specs(filter_requires_python=None):
     # pex.third_party at runtime to inject pkg_resources style namespace packages if needed.
     # N.B.: 44.0.0 is the last setuptools version compatible with Python 2 and we use a fork of that
     # with patches needed to support Pex on the v44.0.0/patches/pex-2.x branch.
-    pex_tool_setuptools_commit = "3acb925dd708430aeaf197ea53ac8a752f7c1863"
+    pantsbuild_setuptools_commit = "3acb925dd708430aeaf197ea53ac8a752f7c1863"
     yield VendorSpec.git(
-        repo="https://github.com/pex-tool/setuptools",
-        commit=pex_tool_setuptools_commit,
+        repo="https://github.com/pantsbuild/setuptools",
+        commit=pantsbuild_setuptools_commit,
         project_name="setuptools",
         # Setuptools from source requires running bootstrap.py 1st manually due to circularity in
         # needing setuptools to build setuptools. The bootstrap runs `setup.py egg_info` which
@@ -258,9 +246,12 @@ def iter_vendor_specs(filter_requires_python=None):
 
                 subprocess.check_call([sys.executable, "bootstrap.py"])
                 """
-            ).format(commit=pex_tool_setuptools_commit),
+            ).format(commit=pantsbuild_setuptools_commit),
         ],
     )
+
+    # We expose this to pip at buildtime for legacy builds.
+    yield VendorSpec.pinned("wheel", "0.37.1", rewrite=False)
 
 
 def vendor_runtime(
@@ -329,10 +320,8 @@ def vendor_runtime(
                 files[:] = modules
 
             # We copy over sources and data only; no pyc files.
-            dirs[:] = [d for d in dirs if not is_pyc_dir(d)]
-            for filename in files:
-                if is_pyc_file(filename):
-                    continue
+            dirs[:] = filter_pyc_dirs(dirs)
+            for filename in filter_pyc_files(files):
                 src = os.path.join(root, filename)
                 if src in vendored_sources:
                     continue

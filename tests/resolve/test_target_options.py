@@ -1,10 +1,11 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import itertools
 import json
 import os
 import re
+import sys
 from argparse import ArgumentParser, ArgumentTypeError
 
 import pytest

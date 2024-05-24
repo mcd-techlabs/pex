@@ -1,7 +1,7 @@
-# Copyright 2020 Pex project contributors.
+# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import absolute_import, print_function
+from __future__ import absolute_import
 
 import os
 import tarfile
@@ -11,24 +11,22 @@ from textwrap import dedent
 
 import pytest
 
-from pex.common import open_zip, safe_open, temporary_dir, touch
+from pex.common import open_zip, temporary_dir
 from pex.dist_metadata import (
     Distribution,
     MetadataError,
-    MetadataType,
     ProjectNameAndVersion,
     Requirement,
+    find_dist_info_file,
     project_name_and_version,
     requires_dists,
     requires_python,
 )
-from pex.pep_427 import install_wheel_chroot
-from pex.pep_503 import ProjectName
 from pex.pex_warnings import PEXWarning
 from pex.pip.installation import get_pip
-from pex.resolve.resolver_configuration import BuildConfiguration
 from pex.third_party.packaging.specifiers import SpecifierSet
 from pex.typing import TYPE_CHECKING
+from pex.variables import ENV
 
 if TYPE_CHECKING:
     from typing import Any, Iterator, Tuple
@@ -38,7 +36,7 @@ if TYPE_CHECKING:
 def installed_wheel(wheel_path):
     # type: (str) -> Iterator[Distribution]
     with temporary_dir() as install_dir:
-        install_wheel_chroot(wheel_path=wheel_path, destination=install_dir)
+        get_pip().spawn_install_wheel(wheel=wheel_path, install_dir=install_dir).wait()
         yield Distribution.load(install_dir)
 
 
@@ -59,7 +57,7 @@ def downloaded_sdist(requirement):
             download_dir=download_dir,
             requirements=[requirement],
             transitive=False,
-            build_configuration=BuildConfiguration.create(allow_wheels=False),
+            use_wheel=False,
         ).wait()
         dists = os.listdir(download_dir)
         assert len(dists) == 1, "Expected 1 dist to be downloaded for {}.".format(requirement)
@@ -131,7 +129,7 @@ def test_project_name_and_version_from_filename_pep625():
     # type: () -> None
     assert ProjectNameAndVersion(
         "a-distribution-name", "1.2.3"
-    ) == ProjectNameAndVersion.from_filename("a-distribution-name-1.2.3.tar.gz")
+    ) == ProjectNameAndVersion.from_filename("a-distribution-name-1.2.3.sdist")
 
 
 def test_project_name_and_version_from_filename_invalid():
@@ -179,7 +177,13 @@ def test_project_name_and_version_fallback(tmpdir):
         # N.B.: Valid PKG-INFO at an invalid location.
         tf.add(pkg_info_src, arcname="PKG-INFO")
 
-    assert project_name_and_version(sdist_path, fallback_to_filename=False) is None
+    with ENV.patch(PEX_EMIT_WARNINGS="True"), warnings.catch_warnings(record=True) as events:
+        assert project_name_and_version(sdist_path, fallback_to_filename=False) is None
+        assert 1 == len(events)
+        warning = events[0]
+        assert PEXWarning == warning.category
+        assert "bar-baz-4.5.6/PKG-INFO" in str(warning.message)
+
     assert ProjectNameAndVersion("bar-baz", "4.5.6") == project_name_and_version(
         sdist_path, fallback_to_filename=True
     )
@@ -188,7 +192,6 @@ def test_project_name_and_version_fallback(tmpdir):
     pkf_info_path = "{}/PKG-INFO".format(name_and_version)
 
     def write_sdist_tgz(extension):
-        # type: (str) -> str
         sdist_path = tmp_path("{}.{}".format(name_and_version, extension))
         with tarfile.open(sdist_path, mode="w:gz") as tf:
             tf.add(pkg_info_src, arcname=pkf_info_path)
@@ -198,7 +201,7 @@ def test_project_name_and_version_fallback(tmpdir):
         write_sdist_tgz("tar.gz"), fallback_to_filename=False
     )
     assert expected_metadata_project_name_and_version == project_name_and_version(
-        write_sdist_tgz("tgz"), fallback_to_filename=False
+        write_sdist_tgz("sdist"), fallback_to_filename=False
     )
 
     zip_sdist_path = tmp_path("{}.zip".format(name_and_version))
@@ -249,7 +252,7 @@ def test_requires_dists_none(pygoogleearth_zip_sdist):
         assert [] == list(requires_dists(dist))
 
     # This tests a strange case detailed here:
-    #   https://github.com/pex-tool/pex/issues/1201#issuecomment-791715585
+    #   https://github.com/pantsbuild/pex/issues/1201#issuecomment-791715585
     with downloaded_sdist("et-xmlfile==1.0.1") as sdist, warnings.catch_warnings(
         record=True
     ) as events:
@@ -265,7 +268,7 @@ def test_requires_dists_none(pygoogleearth_zip_sdist):
 
                 You may have issues using the 'et_xmlfile' distribution as a result.
                 More information on this workaround can be found here:
-                  https://github.com/pex-tool/pex/issues/1201#issuecomment-791715585
+                  https://github.com/pantsbuild/pex/issues/1201#issuecomment-791715585
                 """
             ).format(sdist=sdist)
             == str(warning.message)
@@ -285,86 +288,48 @@ def test_wheel_metadata_project_name_fuzzy_issues_1375():
         assert expected == project_name_and_version(dist)
 
 
-@pytest.mark.parametrize(
-    "metadata_type",
-    [
-        pytest.param(metadata_type, id=str(metadata_type))
-        for metadata_type in (MetadataType.DIST_INFO, MetadataType.EGG_INFO)
-    ],
-)
-def test_find_dist_info_file(
-    tmpdir,  # type: Any
-    metadata_type,  # type: MetadataType.Value
-):
-    # type: (...) -> None
+def test_find_dist_info_file():
+    # type: () -> None
     assert (
-        metadata_type.load_metadata(location=str(tmpdir), project_name=ProjectName("foo")) is None
-    )
-
-    def metadata_dir_name(project_name_and_version):
-        # type: (str) -> str
-        return "{project_name_and_version}.{metadata_type}".format(
-            project_name_and_version=project_name_and_version,
-            metadata_type="dist-info" if metadata_type is MetadataType.DIST_INFO else "egg-info",
+        find_dist_info_file(
+            project_name="foo",
+            version="1.0",
+            filename="bar",
+            listing=[],
         )
+        is None
+    )
 
-    metadata_file_name = "METADATA" if metadata_type is MetadataType.DIST_INFO else "PKG-INFO"
-
-    touch(os.path.join(str(tmpdir), metadata_dir_name("foo-1.0"), "baz"))
     assert (
-        metadata_type.load_metadata(location=str(tmpdir), project_name=ProjectName("foo")) is None
+        find_dist_info_file(
+            project_name="foo",
+            version="1.0",
+            filename="bar",
+            listing=[
+                "foo-1.0.dist-info/baz",
+            ],
+        )
+        is None
     )
 
-    touch(os.path.join(str(tmpdir), metadata_dir_name("foo-1.0"), metadata_file_name))
-    assert (
-        metadata_type.load_metadata(location=str(tmpdir), project_name=ProjectName("foo")) is None
+    assert "Foo-1.0.dist-info/bar" == find_dist_info_file(
+        project_name="foo",
+        version="1.0",
+        filename="bar",
+        listing=[
+            "foo-100.dist-info/bar",
+            "Foo-1.0.dist-info/bar",
+            "foo-1.0.dist-info/bar",
+        ],
     )
 
-    def write_pkg_info_file(
-        location,  # type: str
-        name,  # type: str
-        version,  # type: str
-    ):
-        # type: (...) -> None
-        with safe_open(
-            os.path.join(
-                location,
-                metadata_dir_name("{name}-{version}".format(name=name, version=version)),
-                metadata_file_name,
-            ),
-            "w",
-        ) as fp:
-            print("Metadata-Version: 1.0", file=fp)
-            print("Name: {name}".format(name=name), file=fp)
-            print("Version: {version}".format(version=version), file=fp)
-
-    foo_location = os.path.join(str(tmpdir), "foo_location")
-    touch(os.path.join(foo_location, metadata_dir_name("foo-100"), "bar"))
-    expected_metadata_relpath = os.path.join(metadata_dir_name("Foo-1.0"), "bar")
-    touch(os.path.join(foo_location, expected_metadata_relpath))
-    write_pkg_info_file(foo_location, name="Foo", version="1.0")
-
-    metadata_files = metadata_type.load_metadata(
-        location=foo_location, project_name=ProjectName("foo")
-    )
-    assert metadata_files is not None
-    assert expected_metadata_relpath == metadata_files.metadata_file_rel_path("bar")
-
-    stress_location = os.path.join(str(tmpdir), "stress_location")
-    touch(os.path.join(stress_location, "direct_url.json"))
-    touch(os.path.join(stress_location, metadata_dir_name("foo-1.0rc0"), "direct_url.json"))
-    expected_metadata_relpath = os.path.join(
-        metadata_dir_name("stress__-.-__Test-1.0rc0"), "direct_url.json"
-    )
-    touch(os.path.join(stress_location, expected_metadata_relpath))
-    write_pkg_info_file(
-        stress_location,
-        name="stress__-.-__Test",
+    assert "stress__-.-__Test-1.0rc0.dist-info/direct_url.json" == find_dist_info_file(
+        project_name="Stress-.__Test",
         version="1.0rc0",
+        filename="direct_url.json",
+        listing=[
+            "direct_url.json",
+            "foo-1.0rc0.dist-info/direct_url.json",
+            "stress__-.-__Test-1.0rc0.dist-info/direct_url.json",
+        ],
     )
-
-    metadata_files = metadata_type.load_metadata(
-        location=stress_location, project_name=ProjectName("Stress-.__Test")
-    )
-    assert metadata_files is not None
-    assert expected_metadata_relpath == metadata_files.metadata_file_rel_path("direct_url.json")

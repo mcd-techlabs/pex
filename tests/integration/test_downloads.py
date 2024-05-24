@@ -1,14 +1,16 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 import hashlib
 import os.path
 
 import pytest
 
+from pex.pep_503 import ProjectName
 from pex.resolve.configured_resolver import ConfiguredResolver
 from pex.resolve.downloads import ArtifactDownloader
-from pex.resolve.locked_resolve import Artifact, FileArtifact, LockConfiguration, LockStyle
+from pex.resolve.locked_resolve import Artifact, FileArtifact
 from pex.resolve.resolved_requirement import Fingerprint, PartialArtifact
+from pex.resolve.resolver_configuration import PipConfiguration
 from pex.typing import TYPE_CHECKING
 from testing import IS_LINUX
 
@@ -54,10 +56,7 @@ MAC_ARTIFACT = file_artifact(
 @pytest.fixture
 def downloader():
     # type: () -> ArtifactDownloader
-    return ArtifactDownloader(
-        resolver=ConfiguredResolver.default(),
-        lock_configuration=LockConfiguration(style=LockStyle.UNIVERSAL),
-    )
+    return ArtifactDownloader(ConfiguredResolver.default())
 
 
 def test_issue_1849_download_foreign_artifact(

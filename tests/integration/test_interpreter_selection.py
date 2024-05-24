@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -8,8 +8,10 @@ from textwrap import dedent
 import pytest
 
 from pex.common import safe_open, temporary_dir
+from pex.dist_metadata import find_distribution
 from pex.interpreter import PythonInterpreter
 from pex.interpreter_constraints import InterpreterConstraints
+from pex.pep_503 import ProjectName
 from pex.pex_info import PexInfo
 from pex.typing import TYPE_CHECKING
 from testing import (
@@ -404,7 +406,7 @@ def test_interpreter_selection_using_os_environ_for_bootstrap_reexec(
     selection logic and validate a corresponding bugfix.
 
     More details on the nature of the bug can be found at:
-    https://github.com/pex-tool/pex/pull/441
+    https://github.com/pantsbuild/pex/pull/441
     """
     td = os.path.join(str(tmpdir), "tester_project")
     pexrc_path = os.path.join(td, ".pexrc")

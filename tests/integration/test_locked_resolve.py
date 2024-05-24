@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import hashlib
@@ -55,7 +55,9 @@ def create_lock_observer(lock_configuration):
         resolver=ConfiguredResolver(pip_configuration=pip_configuration),
         wheel_builder=WheelBuilder(
             package_index_configuration,
-            build_configuration=pip_configuration.build_configuration,
+            prefer_older_binary=pip_configuration.prefer_older_binary,
+            use_pep517=pip_configuration.use_pep517,
+            build_isolation=pip_configuration.build_isolation,
         ),
         package_index_configuration=package_index_configuration,
     )

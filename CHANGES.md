@@ -1,265 +1,5 @@
 # Release Notes
 
-## 2.3.1
-
-This release fixes Pex to respect lock file interpreter constraints and
-target systems when downloading artifacts.
-
-* Fix lock downloads to use all lock info. (#2396)
-
-## 2.3.0
-
-This release introduces `pex3 lock sync` as a higher-level tool that
-can be used to create and maintain a lock as opposed to using a
-combination of `pex3 lock create` and `pex3 lock update`. When there is
-no existing lock file, `pex3 lock sync --lock lock.json ...` is
-equivalent to `pex3 lock create --output lock.json ...`, it creates a
-new lock. On subsequent uses however,
-`pex3 lock sync --lock lock.json ...` updates the lock file minimally to
-meet any changed requirements or other changed lock settings.
-
-This release also fixes `pex --no-build --lock ...` to work with lock
-files also created with `--no-build`. The known case here is a
-`--style universal` lock created with `--no-build` to achieve a
-wheel-only universal lock.
-
-This release includes a fix to clarify the conditions under which
-`--requierements-pex` can be used to combine the third party
-dependencies from a pre-built PEX into a new PEX; namely, that the PEXes
-must use the same value for the `--pre-install-wheels` option.
-
-Finally, this release fixes `pex3 venv` to handle venvs created by
-Virtualenv on systems that distinguish `purelib` and `platlib`
-site-packages directories. Red Hat distributions are a notable example
-of this.
-
-* Implement pex3 lock sync. (#2373)
-* Guard against mismatched `--requirements-pex`. (#2392)
-* Fix `pex --no-build --lock ...`. (#2390)
-* Fix Pex to handle venvs with multiple site-packages dirs. (#2383)
-
-## 2.2.2
-
-This release fixes `pex3 lock create` to handle `.tar.bz2` and `.tgz`
-sdists in addition to the officially sanctioned `.tar.gz` and (less
-officially so) `.zip` sdists.
-
-* Handle `.tar.bz2` & `.tgz` sdists when locking. (#2380)
-
-## 2.2.1
-
-This release trims down the size of the Pex wheel on PyPI and the
-released Pex PEX by about 20KB by consolidating image resources.
-
-This release also fixes the release process to remove a window of time
-when several links would be dead on at https://docs.pex-tool.org that
-pointed to release artifacts that were not yet fully deployed.
-
-* Fix release ordering of the doc site deploy. (#2369)
-* Trim embedded doc image assets. (#2368)
-
-## 2.2.0
-
-This release adds tools to interact with Pex's new embedded offline
-documentation. You can browse those docs with `pex --docs` or, more
-flexibly, with `pex3 docs`. See `pex3 docs --help` for all the options
-available.
-
-This release also returns to [SemVer](https://semver.org/) versioning
-practices. Simply, you can expect 3 things from Pex version numbers:
-
-+ The first component (the major version) will remain 2 as long as
-  possible. Pex tries very hard to never break existing users and to
-  allow them to upgrade without fear of breaking. This includes not
-  breaking Python compatibility. In Pex 2, Python 2.7 is supported as
-  well as Python 3.5+ for both CPython and PyPy. Pex will only continue
-  to add support for new CPython and PyPy releases and never remove
-  support for already supported Python versions while the major version
-  remains 2.
-+ The second component (the minor version) will be incremented whenever
-  a release adds a feature. Since Pex is a command line tool only (not
-  a library), this means you can expect a new subcommand, a new option,
-  or a new allowable option value was added. Bugs might also have been
-  fixed.
-+ The third component (the patch version) indicates only bugs were
-  fixed.
-
-You can expect the minor version to get pretty big going forward!
-
-* Add `pex --docs` and several `pex3 docs` options. (#2365)
-
-## 2.1.164
-
-This release moves Pex documentation from https://pex.readthedocs.io to
-https://docs.pex-tool.org. While legacy versioned docs will remain
-available at RTD in perpetuity, going forward only the latest Pex
-release docs will be available online at the https://docs.pex-tool.org
-site. If you want to see the Pex docs for the version you are currently
-using, Pex now supports the `pex3 docs` command which will serve the
-docs for your Pex version locally, offline, but with full functionality,
-including search.
-
-* Re-work Pex documentation. (#2362)
-
-## 2.1.163
-
-This release fixes Pex to work in certain OS / SSL environments where it
-did not previously. In particular, under certain Fedora distributions
-using certain Python Build Standalone interpreters.
-
-* Create SSLContexts in the main thread. (#2356)
-
-## 2.1.162
-
-This release adds support for `--pip-version 24.0` as well as fixing a
-bug in URL encoding for artifacts in lock files. Notably, torch's use of
-local version identifiers (`+cpu`) combined with their find links page
-at https://download.pytorch.org/whl/torch_stable.html would lead to
-`pex3 lock create` errors.
-
-* Add support for Pip 24.0. (#2350)
-* Fix URL escaping for lock artifacts. (#2349)
-
-## 2.1.161
-
-This release adds support for `--only-wheel <project name>` and
-`--only-build <project name>` to allow finer control over which
-distribution artifacts are resolved when building a PEX or creating or
-updating a lock file. These options correspond to Pip's `--only-binary`
-and `--no-binary` options with project name arguments.
-
-* Plumb Pip's `--{no,only}-binary`. (#2346)
-
-## 2.1.160
-
-This release adds the ability for `pex3 lock update` to replace
-requirements in a lock or delete them from the lock using
-`-R` / `--replace-project` and `-d` / `--delete-project`, respectively.
-
-* Lock updates support deleting & replacing reqs. (#2335)
-
-## 2.1.159
-
-This release brings a fix for leaks of Pex's vendored `attrs` onto the
-`sys.path` of PEXes during boot in common usage scenarios.
-
-* Fix vendored attrs `sys.path` leak. (#2328)
-
-## 2.1.158
-
-This release adds support for tab completion to all PEX repls running
-under Pythons with the `readline` module available. This tab completion
-support is on-par with newer Python REPL out of the box tab completion
-support.
-
-* Add tab-completion support to PEX repls. (#2321)
-
-## 2.1.157
-
-This release fixes a bug in `pex3 lock update` for updates that leave
-projects unchanged whose primary artifact is an sdist.
-
-* Fix lock updates for locks with sdist bystanders. (#2325)
-
-## 2.1.156
-
-This release optimizes wheel install overhead for warm caches. Notably,
-this speeds up warm boot for PEXes containing large distributions like
-PyTorch as well as creating venvs from them.
-
-* Lower noop wheel install overhead. (#2315)
-
-## 2.1.155
-
-This release brings support for `--pip-version 23.3.2` along with
-optimizations that reduce built PEX size for both `--include-tools` and
-`--venv` PEXes (which includes the Pex PEX) as well as reduce PEX build
-time for `--pre-install-wheels` PEXes (the default) and PEX cold first
-boot time for `--no-pre-install-wheels` PEXes that use more than one
-parallel install job.
-
-* Add support for Pip 23.3.2. (#2307)
-* Remove `Pip.spawn_install_wheel` & optimize. (#2305)
-* Since we no longer use wheel code, remove it. (#2302)
-
-## 2.1.154
-
-This release brings three new features:
-
-1.  When creating PEXes without specifying an explicit
-    `--python-shebang`, an appropriate shebang is chosen correctly in
-    more cases than previously and a warning is emitted when the shebang
-    chosen cannot be guaranteed to be correct. The common case this
-    helps select the appropriate shebang for is PEXes built using
-    `--platform` or `--complete-platform`.
-2.  PEXes can now be created with `--no-pre-install-wheels` to cut down
-    PEX build times with a tradeoff of roughly 10% greater boot overhead
-    upon the 1st execution of the PEX file. For PEXes with very large
-    dependency sets (machine learning provides common cases), the build
-    time savings can be dramatic.
-3.  PEXes can now be told to install dependencies at runtime on 1st
-    execution using parallel processes using `--max-install-jobs` at PEX
-    build time or by setting the `PEX_MAX_INSTALL_JOBS` environment
-    variable at runtime.
-
-The last two features come with complicated tradeoffs and are turned off
-by default as a result. If you think they might help some of your use
-cases, there is more detail in the command line help for
-`--no-pre-install-wheels` and `--max-install-jobs` as well as in the
-`pex --help-variables` output for `PEX_MAX_INSTALL_JOBS`. You can also
-find a detailed performance analysis in #2292 for the extreme cases of
-very small and very large PEXes. In the end though, experimenting is
-probably your best bet.
-
-* Use appropriate shebang for multi-platform PEXes. (#2296)
-* Add support for --no-pre-install-wheels and --max-install-jobs. (#2298)
-
-## 2.1.153
-
-This release fixes Pex runtime `sys.path` scrubbing to do less work and
-thus avoid errors parsing system installed distributions with bad
-metadata.
-
-* Remove Pex runtime scrubbing dist discovery. (#2290)
-
-## 2.1.152
-
-This release fixes the computation of the hash of the code within a PEX
-when nested within directories, a bug introduced in 2.1.149.
-
-* Exclude pyc dirs, not include, when hashing code (#2286)
-
-## 2.1.151
-
-This release brings support for a new `--exclude <req>` PEX build option
-that allows eliding selected resolved distributions from the final PEX.
-This is an advanced feature that will, in general, lead to broken PEXes
-out of the box; so read up on the `--exclude` command line help to make
-sure you understand the consequences.
-
-This release also brings a fix for `--inject-env` that ensures the
-specified environment variables are always injected to the PEX at
-runtime regardless of the PEX entry point exercised.
-
-* Implement support for `--exclude <req>`. (#2281)
-* Relocate environment variable injection to before the interpreter is run (#2260)
-
-## 2.1.150
-
-This release brings support for `--pip-version 23.3.1`.
-
-* Add support for Pip 23.3.1. (#2276)
-
-## 2.1.149
-
-Fix `--style universal` lock handing of `none` ABI wheels with a
-specific Python minor version expressed in their wheel tag. There are
-not many of these in the wild, but a user discovered the case of
-python-forge 18.6.0 which supplies 1 file on PyPI:
-`python_forge-18.6.0-py35-none-any.whl`.
-
-* Fix universal lock handling of the none ABI. (#2270)
-
 ## 2.1.148
 
 Add support to the Pex for checking if built PEXes are valid Python
@@ -668,7 +408,7 @@ In addition, you can now "inject" runtime environment variables and
 arguments into PEX files such that, when run, the PEX runtime ensures
 those environment variables and command line arguments are passed to the
 PEXed application. See [PEX Recipes](
-https://docs.pex-tool.org/recipes.html#uvicorn-and-other-customizable-application-servers
+https://pex.readthedocs.io/en/latest/recipes.html#uvicorn-and-other-customizable-application-servers
 )
 for more information.
 
@@ -1122,7 +862,7 @@ PEX venvs (More on additional data files
 as well as a new venv install `--scope` that can be used to create fully
 optimized container images with PEXed applications (See how to use this
 feature
-[here](https://docs.pex-tool.org/recipes.html#pex-app-in-a-container)).
+[here](https://pex.readthedocs.io/en/latest/recipes.html#pex-app-in-a-container)).
 
 * Support splitting venv creation into deps & srcs. (#1634)
 * Fix handling of data files when creating venvs. (#1632)
@@ -1153,7 +893,7 @@ pre-built wheels are available for that foreign platform.
 
 Additionally, PEXes now know how to set a usable process name when the
 PEX contains the `setproctitle` distribution. See
-[here](https://docs.pex-tool.org/recipes.html#long-running-pex-applications-and-daemons)
+[here](https://pex.readthedocs.io/en/v2.1.66/recipes.html#long-running-pex-applications-and-daemons)
 for more information.
 
 * Add support for `--complete-platform`. (#1609)
@@ -1249,7 +989,7 @@ creating optimized container images from PEX files.
 ## 2.1.55
 
 This release brings official support for Python 3.10 as well as fixing
-<https://docs.pex-tool.org> doc generation and fixing help for
+<https://pex.readthedocs.io> doc generation and fixing help for
 `pex-tools` / `PEX_TOOLS=1 ./my.pex` pex tools invocations that have too
 few arguments.
 
@@ -1303,7 +1043,7 @@ contain those characters under PyPy3, Python 3.5 and Python 3.6.
 This is another hotfix of the 2.1.48 release's `--layout` feature that
 fixes identification of `--layout zipapp` PEXes that have had their
 execute mode bit turned off. A notable example is the Pex PEX when
-downloaded from <https://github.com/pex-tool/pex/releases>.
+downloaded from <https://github.com/pantsbuild/pex/releases>.
 
 * Fix zipapp layout identification. (#1448)
 
@@ -1648,7 +1388,7 @@ This release improves interpreter discovery to prefer more recent patch
 versions, e.g. preferring Python 3.6.10 over 3.6.8.
 
 We recently regained access to the docsite, and
-<https://docs.pex-tool.org/> is now up-to-date.
+<https://pex.readthedocs.io/en/latest/> is now up-to-date.
 
 * Prefer more recent patch versions in interpreter discovery. (#1088)
 * Fix `--pex-python` when it's the same as the current interpreter.
@@ -1813,7 +1553,7 @@ applications when specifying the `--unzip` option. PEXes built with
 there already and then re-execute themselves from there. This can
 improve startup latency. Pex itself now uses this mode in our [PEX
 release](
-https://github.com/pex-tool/pex/releases/download/v2.1.8/pex).
+https://github.com/pantsbuild/pex/releases/download/v2.1.8/pex).
 
 * Better support unzip mode PEXes. (#941)
 * Support an unzip toggle for PEXes. (#939)
@@ -1832,7 +1572,7 @@ new support for control of the cache's runtime location with
 control the cache's runtime location.
 
 Unlike in the past, the [Pex PEX](
-https://github.com/pex-tool/pex/releases/download/v2.1.7/pex) we
+https://github.com/pantsbuild/pex/releases/download/v2.1.7/pex) we
 release can now also be controlled via the `PEX_ROOT` environment
 variable. Consult the CLI help for `--no-strip-pex-env`cto find out
 more.
@@ -2549,7 +2289,7 @@ normalization.
 
 * Add support for `.pexrc` files for influencing the pex environment.
     See the notes [here](
-    https://github.com/pex-tool/pex/blob/master/docs/buildingpex.rst#tailoring-pex-execution-at-build-time
+    https://github.com/pantsbuild/pex/blob/master/docs/buildingpex.rst#tailoring-pex-execution-at-build-time
     ).
 * Bug fix: PEX_PROFILE_FILENAME and PEX_PROFILE_SORT were not
     respected.
@@ -2576,7 +2316,7 @@ normalization.
     with default values that were not explicitly set in the environment.
     Fixes #135.
 * Bug fix: Since
-    [69649c1](https://github.com/pex-tool/pex/commit/69649c1) we have
+    [69649c1](https://github.com/pantsbuild/pex/commit/69649c1) we have
     been un-patching the side effects of `sys.modules` after
     `PEX.execute`. This takes all modules imported during the PEX
     lifecycle and sets all their attributes to `None`. Unfortunately,
@@ -2723,7 +2463,7 @@ This is the last release before the 1.0.0 development branch is started.
     [requests](https://github.com/kennethreitz/requests), improving both
     performance and security. For more information, read the commit
     notes at [91c7f32](
-    https://github.com/pex-tool/pex/commit/91c7f324085c18af714d35947b603a5f60aeb682
+    https://github.com/pantsbuild/pex/commit/91c7f324085c18af714d35947b603a5f60aeb682
     ).
 * Improvements to API documentation throughout.
 * Renamed `Tracer` to `TraceLogger` to prevent nondeterministic isort

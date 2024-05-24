@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -13,15 +13,18 @@ import pytest
 from pex import resolver
 from pex.common import temporary_dir
 from pex.compatibility import to_bytes
-from pex.dist_metadata import Distribution
+from pex.dist_metadata import DistMetadata, Distribution
 from pex.environment import PEXEnvironment, _InvalidWheelName, _RankedDistribution
 from pex.fingerprinted_distribution import FingerprintedDistribution
 from pex.inherit_path import InheritPath
 from pex.interpreter import PythonInterpreter
+from pex.pep_440 import Version
+from pex.pep_503 import ProjectName
 from pex.pex import PEX
 from pex.pex_builder import PEXBuilder
 from pex.pex_info import PexInfo
 from pex.resolve.configured_resolver import ConfiguredResolver
+from pex.resolve.resolver_configuration import PipConfiguration
 from pex.targets import LocalInterpreter, Targets
 from pex.typing import TYPE_CHECKING
 from testing import (
@@ -35,7 +38,6 @@ from testing import (
     temporary_content,
     temporary_filename,
 )
-from testing.dist_metadata import create_dist_metadata
 
 if TYPE_CHECKING:
     from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
@@ -136,13 +138,13 @@ def assert_force_local_implicit_ns_packages_issues_598(
 
     def add_requirements(builder):
         # type: (PEXBuilder) -> None
-        for resolved_dist in resolver.resolve(
+        for installed_dist in resolver.resolve(
             targets=Targets(interpreters=(builder.interpreter,)),
             requirements=requirements,
             resolver=ConfiguredResolver.default(),
-        ).distributions:
-            builder.add_distribution(resolved_dist.distribution)
-            for direct_req in resolved_dist.direct_requirements:
+        ).installed_distributions:
+            builder.add_distribution(installed_dist.distribution)
+            for direct_req in installed_dist.direct_requirements:
                 builder.add_requirement(direct_req)
 
     def add_wheel(builder, content):
@@ -158,10 +160,7 @@ def assert_force_local_implicit_ns_packages_issues_598(
                 builder.add_source(os.path.join(project, path), path)
 
     with temporary_dir() as root:
-        pex_root = os.path.join(root, "pex_root")
-
         pex_info1 = PexInfo.default()
-        pex_info1.pex_root = pex_root
         pex1 = os.path.join(root, "pex1.pex")
         builder1 = PEXBuilder(interpreter=interpreter, pex_info=pex_info1)
         add_requirements(builder1)
@@ -170,7 +169,6 @@ def assert_force_local_implicit_ns_packages_issues_598(
         builder1.build(pex1)
 
         pex_info2 = PexInfo.default()
-        pex_info2.pex_root = pex_root
         pex_info2.pex_path = [pex1]
         pex2 = os.path.join(root, "pex2")
         builder2 = PEXBuilder(path=pex2, interpreter=interpreter, pex_info=pex_info2)
@@ -206,7 +204,7 @@ skip_if_no_pkg_resources = pytest.mark.skipif(
 
 
 @skip_if_no_pkg_resources
-@pytest.mark.xfail(IS_PYPY3, reason="https://github.com/pex-tool/pex/issues/1210")
+@pytest.mark.xfail(IS_PYPY3, reason="https://github.com/pantsbuild/pex/issues/1210")
 def test_issues_598_explicit_any_interpreter():
     # type: () -> None
     assert_force_local_implicit_ns_packages_issues_598(
@@ -273,12 +271,12 @@ def test_osx_platform_intel_issue_523():
     # successfully install psutil; yield_pex_builder sets up the bad interpreter with our vendored
     # setuptools and wheel extras.
     with yield_pex_builder(interpreter=bad_interpreter()) as pb, temporary_filename() as pex_file:
-        for resolved_dist in resolver.resolve(
+        for installed_dist in resolver.resolve(
             targets=Targets(interpreters=(pb.interpreter,)),
             requirements=["psutil==5.4.3"],
             resolver=ConfiguredResolver.default(),
-        ).distributions:
-            pb.add_dist_location(resolved_dist.distribution.location)
+        ).installed_distributions:
+            pb.add_dist_location(installed_dist.distribution.location)
         pb.build(pex_file)
 
         # NB: We want PEX to find the bare bad interpreter at runtime.
@@ -341,14 +339,14 @@ def test_osx_platform_intel_issue_523():
 def test_activate_extras_issue_615():
     # type: () -> None
     with yield_pex_builder() as pb:
-        for resolved_dist in resolver.resolve(
+        for installed_dist in resolver.resolve(
             targets=Targets(interpreters=(pb.interpreter,)),
             requirements=["pex[requests]==1.6.3"],
             resolver=ConfiguredResolver.default(),
-        ).distributions:
-            for direct_req in resolved_dist.direct_requirements:
+        ).installed_distributions:
+            for direct_req in installed_dist.direct_requirements:
                 pb.add_requirement(direct_req)
-            pb.add_dist_location(resolved_dist.distribution.location)
+            pb.add_dist_location(installed_dist.distribution.location)
         pb.set_script("pex")
         pb.freeze()
         process = PEX(pb.path(), interpreter=pb.interpreter).run(
@@ -369,11 +367,11 @@ def assert_namespace_packages_warning(distribution, version, expected_warning):
     # type: (str, str, bool) -> None
     requirement = "{}=={}".format(distribution, version)
     pb = PEXBuilder()
-    for resolved_dist in resolver.resolve(
+    for installed_dist in resolver.resolve(
         requirements=[requirement],
         resolver=ConfiguredResolver.default(),
-    ).distributions:
-        pb.add_dist_location(resolved_dist.distribution.location)
+    ).installed_distributions:
+        pb.add_dist_location(installed_dist.distribution.location)
     pb.freeze()
 
     process = PEX(pb.path()).run(args=["-c", ""], blocking=False, stderr=subprocess.PIPE)
@@ -415,9 +413,7 @@ def create_dist(
     return FingerprintedDistribution(
         distribution=Distribution(
             location=location,
-            metadata=create_dist_metadata(
-                project_name=project_name, version=version, location=location
-            ),
+            metadata=DistMetadata(project_name=ProjectName(project_name), version=Version(version)),
         ),
         fingerprint=location,
     )

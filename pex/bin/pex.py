@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 """
@@ -23,15 +23,12 @@ from pex.commands.command import (
     global_environment,
     register_global_arguments,
 )
-from pex.common import die, is_pyc_dir, is_pyc_file, safe_mkdtemp
-from pex.dependency_manager import DependencyManager
-from pex.docs.command import serve_html_docs
+from pex.common import die, filter_pyc_dirs, filter_pyc_files, safe_mkdtemp
 from pex.enum import Enum
 from pex.inherit_path import InheritPath
 from pex.interpreter_constraints import InterpreterConstraints
-from pex.layout import Layout, ensure_installed
+from pex.layout import Layout, maybe_install
 from pex.orderedset import OrderedSet
-from pex.pep_427 import InstallableType
 from pex.pex import PEX
 from pex.pex_bootstrapper import ensure_venv
 from pex.pex_builder import Check, CopyMode, PEXBuilder
@@ -41,7 +38,7 @@ from pex.resolve.config import finalize as finalize_resolve_config
 from pex.resolve.configured_resolve import resolve
 from pex.resolve.requirement_configuration import RequirementConfiguration
 from pex.resolve.resolvers import Unsatisfiable
-from pex.result import Error, ResultError, catch, try_
+from pex.result import ResultError, catch, try_
 from pex.targets import Targets
 from pex.tracer import TRACER
 from pex.typing import TYPE_CHECKING, cast
@@ -51,7 +48,7 @@ from pex.version import __version__
 
 if TYPE_CHECKING:
     from argparse import Namespace
-    from typing import Dict, Iterable, Iterator, List, NoReturn, Optional, Set, Text, Tuple
+    from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
     import attr  # vendor:skip
 
@@ -88,13 +85,6 @@ class PrintVariableHelpAction(Action):
                 variable_help
             ):
                 print(line)
-        sys.exit(0)
-
-
-class OpenHtmlDocsAction(Action):
-    def __call__(self, *args, **kwargs):
-        # type: (...) -> NoReturn
-        try_(serve_html_docs(open_browser=True))
         sys.exit(0)
 
 
@@ -171,41 +161,6 @@ def configure_clp_pex_options(parser):
             "tradeoffs. Both zipapp and packed layouts install themselves in the PEX_ROOT as loose "
             "apps by default before executing, but these layouts compose with `--venv` execution "
             "mode as well and support `--seed`ing."
-        ),
-    )
-    group.add_argument(
-        "--pre-install-wheels",
-        "--no-pre-install-wheels",
-        dest="pre_install_wheels",
-        default=True,
-        action=HandleBoolAction,
-        help=(
-            "Whether to pre-install third party dependency wheels. Pre-installed wheels will "
-            "always yield slightly faster PEX cold boot times; so they are used by default, but "
-            "they also slow down PEX build time. As the size of dependencies grows you may find a "
-            "tipping point where it makes sense to not pre-install wheels; either because the "
-            "increased cold boot time is irrelevant to your use case or marginal compared to "
-            "other costs. Note that you may be able to use --max-install-jobs to decrease cold "
-            "boot times for some PEX deployment scenarios."
-        ),
-    )
-    group.add_argument(
-        "--max-install-jobs",
-        dest="max_install_jobs",
-        default=1,
-        type=int,
-        help=(
-            "The maximum number of parallel jobs to use when installing third party dependencies "
-            "contained in a PEX during its first boot. By default, this is set to 1 which "
-            "indicates dependencies should be installed in serial. A value of 2 or more indicates "
-            "dependencies should be installed in parallel using exactly this maximum number of "
-            "jobs. A value of 0 indicates the maximum number of parallel jobs should be "
-            "auto-selected taking the number of cores into account. Finally, a value of -1 "
-            "indicates the maximum number of parallel jobs should be auto-selected taking both the "
-            "characteristics of the third party dependencies contained in the PEX and the number "
-            "of cores into account. The third party dependency heuristics are intended to yield "
-            "good install performance, but are opaque and may change across PEX releases if better "
-            "heuristics are discovered. Any other value is illegal."
         ),
     )
     group.add_argument(
@@ -332,22 +287,6 @@ def configure_clp_pex_options(parser):
         "before packaged dependencies), No value (alias for prefer, for backwards "
         "compatibility).".format(
             false=InheritPath.FALSE, fallback=InheritPath.FALLBACK, prefer=InheritPath.PREFER
-        ),
-    )
-
-    group.add_argument(
-        "--exclude",
-        dest="excluded",
-        default=[],
-        type=str,
-        action="append",
-        help=(
-            "Specifies a requirement to exclude from the built PEX. Any distribution included in "
-            "the PEX's resolve that matches the requirement is excluded from the built PEX along "
-            "with all of its transitive dependencies that are not also required by other "
-            "non-excluded distributions. At runtime, the PEX will boot without checking the "
-            "excluded dependencies are available (say, via `--inherit-path`). This option can be "
-            "used multiple times."
         ),
     )
 
@@ -556,7 +495,7 @@ class PythonSource(object):
     subdir = attr.ib(default=None)  # type: Optional[str]
 
     def iter_files(self):
-        # type: () -> Iterator[Tuple[Text, Text]]
+        # type: () -> Iterator[Tuple[str, str]]
         components = self.name.split(".")
         parent_package_dirs = components[:-1]
         source = components[-1]
@@ -581,7 +520,7 @@ class PythonSource(object):
         parent_package_path,  # type: List[str]
         source,  # type: str
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
         raise NotImplementedError()
 
 
@@ -591,13 +530,11 @@ class Package(PythonSource):
         parent_package_path,  # type: List[str]
         source,  # type: str
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
         package_dir = os.path.join(*(parent_package_path + [source]))
         for root, dirs, files in os.walk(package_dir):
-            dirs[:] = [d for d in dirs if not is_pyc_dir(d)]
-            for f in files:
-                if is_pyc_file(f):
-                    continue
+            dirs[:] = list(filter_pyc_dirs(dirs))
+            for f in filter_pyc_files(files):
                 src = os.path.join(root, f)
                 dst = os.path.relpath(src, self.subdir) if self.subdir else src
                 yield src, dst
@@ -609,7 +546,7 @@ class Module(PythonSource):
         parent_package_path,  # type: List[str]
         source,  # type: str
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
         module_src = os.path.join(*(parent_package_path + ["{module}.py".format(module=source)]))
         module_dest = os.path.relpath(module_src, self.subdir) if self.subdir else module_src
         yield module_src, module_dest
@@ -770,22 +707,8 @@ def configure_clp():
         "--help-variables",
         action=PrintVariableHelpAction,
         nargs=0,
-        help=(
-            "Print out help about the various environment variables used to change the behavior "
-            "of a running PEX file."
-        ),
-    )
-    parser.add_argument(
-        "--docs",
-        "--help-html",
-        dest="open_html_docs",
-        action=OpenHtmlDocsAction,
-        nargs=0,
-        help=(
-            "Open a browser to view the embedded documentation for this Pex installation. For "
-            "more flexible interaction with the embedded documentation, you can use this Pex "
-            "installation's `pex3` script. Try `pex3 docs --help` to get started."
-        ),
+        help="Print out help about the various environment variables used to change the behavior of "
+        "a running PEX file.",
     )
 
     return parser
@@ -803,7 +726,7 @@ def _iter_directory_sources(directories):
 
 
 def _iter_python_sources(python_sources):
-    # type: (Iterable[PythonSource]) -> Iterator[Tuple[Text, Text]]
+    # type: (Iterable[PythonSource]) -> Iterator[Tuple[str, str]]
     for python_source in python_sources:
         for src, dst in python_source.iter_files():
             yield src, dst
@@ -855,7 +778,7 @@ def build_pex(
             "dependency cache."
         )
 
-    seen = set()  # type: Set[Tuple[Text, Text]]
+    seen = set()  # type: Set[Tuple[str, str]]
     for src, dst in itertools.chain(
         _iter_directory_sources(
             OrderedSet(options.sources_directory + options.resources_directory)
@@ -882,23 +805,12 @@ def build_pex(
     pex_info.pex_root = options.runtime_pex_root
     pex_info.strip_pex_env = options.strip_pex_env
     pex_info.interpreter_constraints = interpreter_constraints
-    pex_info.deps_are_wheel_files = not options.pre_install_wheels
-    pex_info.max_install_jobs = options.max_install_jobs
 
-    dependency_manager = DependencyManager()
-    excluded = list(options.excluded)  # type: List[str]
+    for requirements_pex in options.requirements_pexes:
+        pex_builder.add_from_requirements_pex(requirements_pex)
 
     with TRACER.timed(
-        "Adding distributions from pexes: {}".format(" ".join(options.requirements_pexes))
-    ):
-        for requirements_pex in options.requirements_pexes:
-            requirements_pex_info = dependency_manager.add_from_pex(
-                requirements_pex, result_type_wheel_file=pex_info.deps_are_wheel_files
-            )
-            excluded.extend(requirements_pex_info.excluded)
-
-    with TRACER.timed(
-        "Resolving distributions for requirements: {}".format(
+        "Resolving distributions ({})".format(
             " ".join(
                 itertools.chain.from_iterable(
                     (
@@ -910,25 +822,21 @@ def build_pex(
         )
     ):
         try:
-            dependency_manager.add_from_resolved(
-                resolve(
-                    targets=targets,
-                    requirement_configuration=requirement_configuration,
-                    resolver_configuration=resolver_configuration,
-                    compile_pyc=options.compile,
-                    ignore_errors=options.ignore_errors,
-                    result_type=(
-                        InstallableType.INSTALLED_WHEEL_CHROOT
-                        if options.pre_install_wheels
-                        else InstallableType.WHEEL_FILE
-                    ),
-                )
+            result = resolve(
+                targets=targets,
+                requirement_configuration=requirement_configuration,
+                resolver_configuration=resolver_configuration,
+                compile_pyc=options.compile,
+                ignore_errors=options.ignore_errors,
             )
+            for installed_dist in result.installed_distributions:
+                pex_builder.add_distribution(
+                    installed_dist.distribution, fingerprint=installed_dist.fingerprint
+                )
+                for direct_req in installed_dist.direct_requirements:
+                    pex_builder.add_requirement(direct_req)
         except Unsatisfiable as e:
             die(str(e))
-
-    with TRACER.timed("Configuring PEX dependencies"):
-        dependency_manager.configure(pex_builder, excluded=excluded)
 
     if options.entry_point:
         pex_builder.set_entry_point(options.entry_point)
@@ -939,24 +847,8 @@ def build_pex(
             filename=options.executable, env_filename="__pex_executable__.py"
         )
 
-    specific_shebang = options.python_shebang or targets.compatible_shebang()
-    if specific_shebang:
-        pex_builder.set_shebang(specific_shebang)
-    else:
-        # TODO(John Sirois): Consider changing fallback to `#!/usr/bin/env python` in Pex 3.x.
-        pex_warnings.warn(
-            "Could not calculate a targeted shebang for:\n"
-            "{targets}\n"
-            "\n"
-            "Using shebang: {default_shebang}\n"
-            "If this is not appropriate, you can specify a custom shebang using the "
-            "--python-shebang option.".format(
-                targets="\n".join(
-                    sorted(target.render_description() for target in targets.unique_targets())
-                ),
-                default_shebang=pex_builder.shebang,
-            )
-        )
+    if options.python_shebang:
+        pex_builder.set_shebang(options.python_shebang)
 
     return pex_builder
 
@@ -982,10 +874,7 @@ def _compatible_with_current_platform(interpreter, platforms):
 def main(args=None):
     args = args[:] if args else sys.argv[1:]
     args = [transform_legacy_arg(arg) for arg in args]
-
-    parser = catch(configure_clp)
-    if isinstance(parser, Error):
-        die(str(parser))
+    parser = configure_clp()
 
     try:
         separator = args.index("--")
@@ -993,10 +882,7 @@ def main(args=None):
     except ValueError:
         args, cmdline = args, []
 
-    options = catch(parser.parse_args, args=args)
-    if isinstance(options, Error):
-        die(str(options))
-
+    options = parser.parse_args(args=args)
     try:
         with global_environment(options) as env:
             requirement_configuration = requirement_options.configure(options)
@@ -1136,7 +1022,9 @@ def seed_cache(
 
         with TRACER.timed("Seeding caches for {}".format(pex_path)):
             final_pex_path = os.path.join(
-                ensure_installed(pex=pex_path, pex_root=pex_root, pex_hash=pex_hash), "__main__.py"
+                maybe_install(pex=pex_path, pex_root=pex_root, pex_hash=pex_hash)
+                or os.path.abspath(pex_path),
+                "__main__.py",
             )
             if verbose:
                 return json.dumps(create_verbose_info(final_pex_path=final_pex_path))

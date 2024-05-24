@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -36,7 +36,7 @@ def test_symlink_preserved_in_argv0(
 
     pex = os.path.join(str(tmpdir), "speak.pex")
     run_pex_command(
-        args=["conscript==0.1.7", "cowsay==5.0", "fortune==1.1.0", "-c", "conscript", "-o", pex]
+        args=["conscript==0.1.6", "cowsay==5.0", "fortune==1.1.0", "-c", "conscript", "-o", pex]
         + boot_args
     ).assert_success()
 

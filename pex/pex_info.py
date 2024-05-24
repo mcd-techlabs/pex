@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -20,8 +20,6 @@ from pex.version import __version__ as pex_version
 
 if TYPE_CHECKING:
     from typing import Any, Dict, Iterable, Mapping, Optional, Text, Tuple, Union
-
-    from pex.dist_metadata import Requirement
 
     # N.B.: These are expensive imports and PexInfo is used during PEX bootstrapping which we want
     # to be as fast as possible.
@@ -105,7 +103,6 @@ class PexInfo(object):
             "venv": Variables.PEX_VENV.strip_default(env),
             "inherit_path": inherit_path,
             "ignore_errors": Variables.PEX_IGNORE_ERRORS.strip_default(env),
-            "max_install_jobs": Variables.PEX_MAX_INSTALL_JOBS.strip_default(env),
         }
         # Filter out empty entries not explicitly set in the environment.
         return cls(info={k: v for k, v in pex_info.items() if v is not None})
@@ -146,8 +143,6 @@ class PexInfo(object):
         if not isinstance(requirements, (list, tuple)):
             raise ValueError("Expected requirements to be a list, got %s" % type(requirements))
         self._requirements = OrderedSet(self._parse_requirement_tuple(req) for req in requirements)
-
-        self._excluded = OrderedSet(self._pex_info.get("excluded", ()))  # type: OrderedSet[str]
 
     def _get_safe(self, key):
         if key not in self._pex_info:
@@ -450,15 +445,6 @@ class PexInfo(object):
     def requirements(self):
         return self._requirements
 
-    def add_excluded(self, requirement):
-        # type: (Requirement) -> None
-        self._excluded.add(str(requirement))
-
-    @property
-    def excluded(self):
-        # type: () -> Iterable[str]
-        return self._excluded
-
     def add_distribution(self, location, sha):
         self._distributions[location] = sha
 
@@ -505,32 +491,6 @@ class PexInfo(object):
         self._pex_info["bootstrap_hash"] = value
 
     @property
-    def deps_are_wheel_files(self):
-        # type: () -> bool
-        return self._pex_info.get("deps_are_wheel_files", False)
-
-    @deps_are_wheel_files.setter
-    def deps_are_wheel_files(self, value):
-        # type: (bool) -> None
-        self._pex_info["deps_are_wheel_files"] = value
-
-    @property
-    def max_install_jobs(self):
-        # type: () -> int
-        return self._pex_info.get("max_install_jobs", 1)
-
-    @max_install_jobs.setter
-    def max_install_jobs(self, value):
-        # type: (int) -> None
-        if value < -1:
-            raise ValueError(
-                "The value for max_install_jobs must be -1 or greater; given: {jobs}".format(
-                    jobs=value
-                )
-            )
-        self._pex_info["max_install_jobs"] = value
-
-    @property
     def bootstrap(self):
         # type: () -> str
         return layout.BOOTSTRAP_DIR
@@ -567,14 +527,12 @@ class PexInfo(object):
                 other.interpreter_constraints
             )
         self._requirements.update(other.requirements)
-        self._excluded.update(other.excluded)
 
     def as_json_dict(self):
         # type: () -> Dict[str, Any]
         data = self._pex_info.copy()
         data["inherit_path"] = self.inherit_path.value
         data["requirements"] = list(self._requirements)
-        data["excluded"] = list(self._excluded)
         data["interpreter_constraints"] = [str(ic) for ic in self.interpreter_constraints]
         data["distributions"] = self._distributions.copy()
         return data
@@ -583,7 +541,6 @@ class PexInfo(object):
         # type: (...) -> str
         data = self.as_json_dict()
         data["requirements"].sort()
-        data["excluded"].sort()
         data["interpreter_constraints"].sort()
         return json.dumps(data, sort_keys=True)
 

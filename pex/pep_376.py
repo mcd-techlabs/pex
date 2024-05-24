@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -11,18 +11,30 @@ import itertools
 import json
 import os
 import shutil
+from contextlib import closing
 from fileinput import FileInput
 
-from pex import hashing
-from pex.common import is_pyc_dir, is_pyc_file, safe_mkdir, safe_open
+from pex import dist_metadata, hashing
+from pex.common import filter_pyc_dirs, filter_pyc_files, is_python_script, safe_mkdir, safe_open
+from pex.compatibility import get_stdout_bytes_buffer, urlparse
+from pex.dist_metadata import Distribution, EntryPoint
 from pex.interpreter import PythonInterpreter
 from pex.typing import TYPE_CHECKING, cast
-from pex.util import CacheHelper
 from pex.venv.virtualenv import Virtualenv
-from pex.wheel import WHEEL, WheelMetadataLoadError
 
 if TYPE_CHECKING:
-    from typing import Callable, Iterable, Iterator, Optional, Protocol, Text, Tuple, Union
+    from typing import (
+        Callable,
+        Container,
+        Dict,
+        Iterable,
+        Iterator,
+        List,
+        Optional,
+        Protocol,
+        Tuple,
+        Union,
+    )
 
     import attr  # vendor:skip
 
@@ -68,11 +80,11 @@ class Hash(object):
 
 
 def find_and_replace_path_components(
-    path,  # type: Text
+    path,  # type: str
     find,  # type: str
     replace,  # type: str
 ):
-    # type: (...) -> Text
+    # type: (...) -> str
     """Replace components of `path` that are exactly `find` with `replace`.
 
     >>> find_and_replace_path_components("foo/bar/baz", "bar", "spam")
@@ -118,10 +130,10 @@ class InstalledFile(object):
     @classmethod
     def normalized_path(
         cls,
-        path,  # type: Text
+        path,  # type: str
         interpreter=None,  # type: Optional[PythonInterpreter]
     ):
-        # type: (...) -> Text
+        # type: (...) -> str
         return find_and_replace_path_components(
             path, cls._python_ver(interpreter=interpreter), cls._PYTHON_VER_PLACEHOLDER
         )
@@ -132,21 +144,30 @@ class InstalledFile(object):
         path,  # type: str
         interpreter=None,  # type: Optional[PythonInterpreter]
     ):
-        # type: (...) -> Text
+        # type: (...) -> str
         return find_and_replace_path_components(
             path, cls._PYTHON_VER_PLACEHOLDER, cls._python_ver(interpreter=interpreter)
         )
 
-    path = attr.ib()  # type: Text
+    path = attr.ib()  # type: str
     hash = attr.ib(default=None)  # type: Optional[Hash]
     size = attr.ib(default=None)  # type: Optional[int]
 
 
+class InstalledWheelError(Exception):
+    pass
+
+
+class LoadError(InstalledWheelError):
+    """Indicates an installed wheel was not loadable at a particular path."""
+
+
+class ReinstallError(InstalledWheelError):
+    """Indicates an error re-installing an installed wheel."""
+
+
 @attr.s(frozen=True)
 class InstalledWheel(object):
-    class LoadError(Exception):
-        """Indicates an installed wheel was not loadable at a particular path."""
-
     _LAYOUT_JSON_FILENAME = ".layout.json"
 
     @classmethod
@@ -159,30 +180,13 @@ class InstalledWheel(object):
         cls,
         prefix_dir,  # type: str
         stash_dir,  # type: str
-        record_relpath,  # type: Text
-        root_is_purelib,  # type: bool
+        record_relpath,  # type: str
     ):
         # type: (...) -> InstalledWheel
-
-        # We currently need the installed wheel chroot hash for PEX-INFO / boot purposes. It is
-        # expensive to calculate; so we do it here 1 time when saving the installed wheel.
-        fingerprint = CacheHelper.dir_hash(prefix_dir, hasher=hashlib.sha256)
-
-        layout = {
-            "stash_dir": stash_dir,
-            "record_relpath": record_relpath,
-            "fingerprint": fingerprint,
-            "root_is_purelib": root_is_purelib,
-        }
+        layout = {"stash_dir": stash_dir, "record_relpath": record_relpath}
         with open(cls.layout_file(prefix_dir), "w") as fp:
             json.dump(layout, fp, sort_keys=True)
-        return cls(
-            prefix_dir=prefix_dir,
-            stash_dir=stash_dir,
-            record_relpath=record_relpath,
-            fingerprint=fingerprint,
-            root_is_purelib=root_is_purelib,
-        )
+        return cls(prefix_dir=prefix_dir, stash_dir=stash_dir, record_relpath=record_relpath)
 
     @classmethod
     def load(cls, prefix_dir):
@@ -192,62 +196,42 @@ class InstalledWheel(object):
             with open(layout_file) as fp:
                 layout = json.load(fp)
         except (IOError, OSError) as e:
-            raise cls.LoadError(
+            raise LoadError(
                 "Failed to load an installed wheel layout from {layout_file}: {err}".format(
                     layout_file=layout_file, err=e
                 )
             )
         if not isinstance(layout, dict):
-            raise cls.LoadError(
+            raise LoadError(
                 "The installed wheel layout file at {layout_file} must contain a single top-level "
                 "object, found: {value}.".format(layout_file=layout_file, value=layout)
             )
         stash_dir = layout.get("stash_dir")
         record_relpath = layout.get("record_relpath")
         if not stash_dir or not record_relpath:
-            raise cls.LoadError(
+            raise LoadError(
                 "The installed wheel layout file at {layout_file} must contain an object with both "
                 "`stash_dir` and `record_relpath` attributes, found: {value}".format(
                     layout_file=layout_file, value=layout
                 )
             )
-
-        fingerprint = layout.get("fingerprint")
-
-        # N.B.: Caching root_is_purelib was not part of the original InstalledWheel layout data; so
-        # we materialize the property if needed to support older installed wheel chroots.
-        root_is_purelib = layout.get("root_is_purelib")
-        if root_is_purelib is None:
-            try:
-                wheel = WHEEL.load(prefix_dir)
-            except WheelMetadataLoadError as e:
-                raise cls.LoadError(
-                    "Failed to determine if installed wheel at {location} is platform-specific: "
-                    "{err}".format(location=prefix_dir, err=e)
-                )
-            root_is_purelib = wheel.root_is_purelib
-
         return cls(
             prefix_dir=prefix_dir,
             stash_dir=cast(str, stash_dir),
             record_relpath=cast(str, record_relpath),
-            fingerprint=cast("Optional[str]", fingerprint),
-            root_is_purelib=root_is_purelib,
         )
 
     prefix_dir = attr.ib()  # type: str
     stash_dir = attr.ib()  # type: str
-    record_relpath = attr.ib()  # type: Text
-    fingerprint = attr.ib()  # type: Optional[str]
-    root_is_purelib = attr.ib()  # type: bool
+    record_relpath = attr.ib()  # type: str
 
     def stashed_path(self, *components):
         # type: (*str) -> str
         return os.path.join(self.prefix_dir, self.stash_dir, *components)
 
     @staticmethod
-    def create_installed_file(
-        path,  # type: Text
+    def _create_installed_file(
+        path,  # type: str
         dest_dir,  # type: str
     ):
         # type: (...) -> InstalledFile
@@ -259,30 +243,29 @@ class InstalledWheel(object):
             size=os.stat(path).st_size,
         )
 
-    def _create_record(
+    def create_record(
         self,
-        dst,  # type: Text
+        dst,  # type: str
         installed_files,  # type: Iterable[InstalledFile]
     ):
         # type: (...) -> None
-        Record.write(
-            dst=os.path.join(dst, self.record_relpath),
-            installed_files=[
-                # The RECORD entry should never include hash or size; so we replace any such entry
-                # with an un-hashed and un-sized one.
-                InstalledFile(self.record_relpath, hash=None, size=None)
-                if installed_file.path == self.record_relpath
-                else installed_file
-                for installed_file in installed_files
-            ],
-        )
+
+        # The RECORD is a csv file with the path to each installed file in the 1st column.
+        # See: https://www.python.org/dev/peps/pep-0376/#record
+        with safe_open(os.path.join(dst, self.record_relpath), "w") as fp:
+            csv_writer = cast(
+                "CSVWriter",
+                csv.writer(fp, delimiter=",", quotechar='"', lineterminator="\n"),
+            )
+            for installed_file in sorted(installed_files, key=lambda installed: installed.path):
+                csv_writer.writerow(attr.astuple(installed_file, recurse=False))
 
     def reinstall_flat(
         self,
         target_dir,  # type: str
         symlink=False,  # type: bool
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
         """Re-installs the installed wheel in a flat target directory.
 
         N.B.: A record of reinstalled files is returned in the form of an iterator that must be
@@ -299,10 +282,10 @@ class InstalledWheel(object):
             self._reinstall_stash(dest_dir=target_dir),
             self._reinstall_site_packages(target_dir, symlink=symlink),
         ):
-            installed_files.append(self.create_installed_file(path=dst, dest_dir=target_dir))
+            installed_files.append(self._create_installed_file(path=dst, dest_dir=target_dir))
             yield src, dst
 
-        self._create_record(target_dir, installed_files)
+        self.create_record(target_dir, installed_files)
 
     def reinstall_venv(
         self,
@@ -310,7 +293,7 @@ class InstalledWheel(object):
         symlink=False,  # type: bool
         rel_extra_path=None,  # type: Optional[str]
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
         """Re-installs the installed wheel in a venv.
 
         N.B.: A record of reinstalled files is returned in the form of an iterator that must be
@@ -322,10 +305,10 @@ class InstalledWheel(object):
 
         :return: An iterator over src -> dst pairs.
         """
-
-        site_packages_dir = venv.purelib if self.root_is_purelib else venv.platlib
         site_packages_dir = (
-            os.path.join(site_packages_dir, rel_extra_path) if rel_extra_path else site_packages_dir
+            os.path.join(venv.site_packages_dir, rel_extra_path)
+            if rel_extra_path
+            else venv.site_packages_dir
         )
 
         installed_files = [InstalledFile(self.record_relpath)]
@@ -333,17 +316,19 @@ class InstalledWheel(object):
             self._reinstall_stash(dest_dir=venv.venv_dir, interpreter=venv.interpreter),
             self._reinstall_site_packages(site_packages_dir, symlink=symlink),
         ):
-            installed_files.append(self.create_installed_file(path=dst, dest_dir=site_packages_dir))
+            installed_files.append(
+                self._create_installed_file(path=dst, dest_dir=site_packages_dir)
+            )
             yield src, dst
 
-        self._create_record(site_packages_dir, installed_files)
+        self.create_record(site_packages_dir, installed_files)
 
     def _reinstall_stash(
         self,
         dest_dir,  # type: str
         interpreter=None,  # type: Optional[PythonInterpreter]
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
 
         link = True
         stash_abs_path = os.path.join(self.prefix_dir, self.stash_dir)
@@ -382,15 +367,13 @@ class InstalledWheel(object):
         site_packages_dir,  # type: str
         symlink=False,  # type: bool
     ):
-        # type: (...) -> Iterator[Tuple[Text, Text]]
+        # type: (...) -> Iterator[Tuple[str, str]]
 
         link = True
         for root, dirs, files in os.walk(self.prefix_dir, topdown=True, followlinks=True):
             if root == self.prefix_dir:
-                dirs[:] = [d for d in dirs if not is_pyc_dir(d) and d != self.stash_dir]
-                files[:] = [
-                    f for f in files if not is_pyc_file(f) and f != self._LAYOUT_JSON_FILENAME
-                ]
+                dirs[:] = [d for d in filter_pyc_dirs(dirs) if d != self.stash_dir]
+                files[:] = [f for f in filter_pyc_files(files) if f != self._LAYOUT_JSON_FILENAME]
 
             traverse = set(dirs)
             for path, is_dir in itertools.chain(
@@ -447,12 +430,6 @@ class UnrecognizedInstallationSchemeError(RecordError):
 
 
 @attr.s(frozen=True)
-class DistInfoFile(object):
-    path = attr.ib()  # type: Text
-    content = attr.ib()  # type: bytes
-
-
-@attr.s(frozen=True)
 class Record(object):
     """Represents the PEP-376 RECORD of an installed wheel.
 
@@ -460,28 +437,10 @@ class Record(object):
     """
 
     @classmethod
-    def write(
-        cls,
-        dst,  # type: Text
-        installed_files,  # type: Iterable[InstalledFile]
-    ):
-        # type: (...) -> None
-
-        # The RECORD is a csv file with the path to each installed file in the 1st column.
-        # See: https://www.python.org/dev/peps/pep-0376/#record
-        with safe_open(dst, "w") as fp:
-            csv_writer = cast(
-                "CSVWriter",
-                csv.writer(fp, delimiter=",", quotechar='"', lineterminator="\n"),
-            )
-            for installed_file in sorted(installed_files, key=lambda installed: installed.path):
-                csv_writer.writerow(attr.astuple(installed_file, recurse=False))
-
-    @classmethod
     def read(
         cls,
-        lines,  # type: Union[FileInput[Text], Iterator[Text]]
-        exclude=None,  # type: Optional[Callable[[Text], bool]]
+        lines,  # type: Union[FileInput[str], Iterator[str]]
+        exclude=None,  # type: Optional[Callable[[str], bool]]
     ):
         # type: (...) -> Iterator[InstalledFile]
 
@@ -497,8 +456,229 @@ class Record(object):
             size = int(file_size) if file_size else None
             yield InstalledFile(path=path, hash=file_hash, size=size)
 
+    @staticmethod
+    def _find_installation(
+        prefix_dir,  # type: str
+        project_name,  # type: str
+        version,  # type: str
+    ):
+        # type: (...) -> Optional[Tuple[str, str, List[str]]]
+
+        # Some distributions in the wild (namely python-certifi-win32 1.6.1,
+        # see: https://github.com/pantsbuild/pex/issues/1861) create their own directories named
+        # `site-packages` that are not in-fact located in site-packages (the "purelib" or "platlib"
+        # sysconfig install paths). Work around these broken packages by just looking for all
+        # `site-packages` subdirectories of the `prefix_dir` and checking each for the installation
+        # `RECORD`. There should always be just one such installation `RECORD` resulting from a
+        # `pip install --prefix <prefix_dir> --no-deps <wheel file>` and so this is safe.
+        site_packages_dirs = [
+            os.path.join(root, d)
+            for root, dirs, _ in os.walk(prefix_dir)
+            for d in dirs
+            if d == "site-packages"
+        ]
+        for site_packages_dir in site_packages_dirs:
+            site_packages_listing = [
+                os.path.relpath(os.path.join(root, f), site_packages_dir)
+                for root, _, files in os.walk(site_packages_dir)
+                for f in files
+            ]
+            record_relative_path = dist_metadata.find_dist_info_file(
+                project_name, version=version, filename="RECORD", listing=site_packages_listing
+            )
+            if record_relative_path:
+                return record_relative_path, site_packages_dir, site_packages_listing
+        return None
+
+    @classmethod
+    def from_prefix_install(
+        cls,
+        prefix_dir,  # type: str
+        project_name,  # type: str
+        version,  # type: str
+    ):
+        result = cls._find_installation(prefix_dir, project_name, version)
+        if not result:
+            raise RecordNotFoundError(
+                "Could not find the installation RECORD for {project_name} {version} under "
+                "{prefix_dir}".format(
+                    project_name=project_name, version=version, prefix_dir=prefix_dir
+                )
+            )
+
+        record_relative_path, site_packages, site_packages_listing = result
+        metadata_dir = os.path.dirname(record_relative_path)
+        base_dir = os.path.relpath(site_packages, prefix_dir)
+        return cls(
+            project_name=project_name,
+            version=version,
+            prefix_dir=prefix_dir,
+            rel_base_dir=base_dir,
+            relative_path=record_relative_path,
+            metadata_listing=tuple(
+                path for path in site_packages_listing if metadata_dir == os.path.dirname(path)
+            ),
+        )
+
     project_name = attr.ib()  # type: str
     version = attr.ib()  # type: str
     prefix_dir = attr.ib()  # type: str
-    rel_base_dir = attr.ib()  # type: Text
-    relative_path = attr.ib()  # type: Text
+    rel_base_dir = attr.ib()  # type: str
+    relative_path = attr.ib()  # type: str
+    _metadata_listing = attr.ib()  # type: Tuple[str, ...]
+
+    def _find_dist_info_file(self, filename):
+        # type: (str) -> Optional[str]
+        metadata_file = dist_metadata.find_dist_info_file(
+            project_name=self.project_name,
+            version=self.version,
+            filename=filename,
+            listing=self._metadata_listing,
+        )
+        if not metadata_file:
+            return None
+        return os.path.join(self.rel_base_dir, metadata_file)
+
+    def fixup_install(
+        self,
+        exclude=(),  # type: Container[str]
+        interpreter=None,  # type: Optional[PythonInterpreter]
+    ):
+        # type: (...) -> InstalledWheel
+        """Fixes a wheel install to be reproducible and importable.
+
+        After fixed up, this RECORD can be used to re-install the wheel in a venv with `reinstall`.
+
+        :param exclude: Any top-level items to exclude.
+        :param interpreter: The interpreter used to perform the wheel install.
+        """
+        self._fixup_scripts()
+        self._fixup_direct_url()
+
+        # The RECORD is unused in PEX zipapp mode and only needed in venv mode. Since it can contain
+        # relative path entries that differ between interpreters - notably pypy for Python < 3.8 has
+        # a custom scheme - we just delete the file and create it on-demand for venv re-installs.
+        os.unlink(os.path.join(self.prefix_dir, self.rel_base_dir, self.relative_path))
+
+        # An example of the installed wheel chroot we're aiming for:
+        # .prefix/bin/...                    # scripts
+        # .prefix/include/site/pythonX.Y/... # headers
+        # .prefix/share/...                  # data files
+        # greenlet/...                       # importables
+        # greenlet-1.1.2.dist-info/...       # importables
+        stash_dir = ".prefix"
+        prefix_stash = os.path.join(self.prefix_dir, stash_dir)
+        safe_mkdir(prefix_stash)
+
+        # 1. Move everything into the stash.
+        for item in os.listdir(self.prefix_dir):
+            if stash_dir == item or item in exclude:
+                continue
+            shutil.move(os.path.join(self.prefix_dir, item), os.path.join(prefix_stash, item))
+        # 2. Normalize all `*/{python ver}` paths to `*/pythonX.Y`
+        for root, dirs, _ in os.walk(prefix_stash):
+            dirs_to_scan = []
+            for d in dirs:
+                path = os.path.join(root, d)
+                normalized_path = InstalledFile.normalized_path(path, interpreter=interpreter)
+                if normalized_path != path:
+                    shutil.move(path, normalized_path)
+                else:
+                    dirs_to_scan.append(d)
+            dirs[:] = dirs_to_scan
+
+        # 3. Move `site-packages` content back up to the prefix dir chroot so that content is
+        # importable when this prefix dir chroot is added to the `sys.path` in PEX zipapp mode.
+        importable_stash = InstalledFile.normalized_path(
+            os.path.join(prefix_stash, self.rel_base_dir), interpreter=interpreter
+        )
+        for importable_item in os.listdir(importable_stash):
+            shutil.move(
+                os.path.join(importable_stash, importable_item),
+                os.path.join(self.prefix_dir, importable_item),
+            )
+        os.rmdir(importable_stash)
+
+        return InstalledWheel.save(
+            prefix_dir=self.prefix_dir,
+            stash_dir=stash_dir,
+            record_relpath=self.relative_path,
+        )
+
+    def _fixup_scripts(self):
+        # type: (...) -> None
+        bin_dir = os.path.join(self.prefix_dir, "bin")
+        if not os.path.isdir(bin_dir):
+            return
+
+        console_scripts = {}  # type: Dict[str, EntryPoint]
+        entry_points_relpath = self._find_dist_info_file("entry_points.txt")
+        if entry_points_relpath:
+            entry_points_abspath = os.path.join(self.prefix_dir, entry_points_relpath)
+            console_scripts.update(
+                Distribution.parse_entry_map(entry_points_abspath).get("console_scripts", {})
+            )
+
+        scripts = {}  # type: Dict[str, Optional[bytes]]
+        for script_name in os.listdir(bin_dir):
+            script_path = os.path.join(bin_dir, script_name)
+            if is_python_script(script_path):
+                scripts[script_path] = None
+            elif script_name in console_scripts:
+                # When a wheel is installed by Pip and that wheel contains console_scripts, they are
+                # normally written with a faux-shebang of:
+                # #!python
+                #
+                # Pex relies on this hermetic shebang and only ever reifies it when creating venvs.
+                #
+                # If Pip is being run under a Python executable with a path length >127 characters
+                # on Linux though, it writes a shebang / header of:
+                # #!/bin/sh
+                # '''exec' <too long path to Pip venv python> "$0" "$@"'
+                # ' '''
+                #
+                # That header is immediately followed by the expected console_script shim contents:
+                # # -*- coding: utf-8 -*-
+                # import re
+                # import sys
+                # from <ep_module> import <ep_func>
+                # if __name__ == '__main__':
+                #     sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])
+                #     sys.exit(main())
+                #
+                # Instead of guessing that 127 characters is the shebang length limit and using
+                # Pip's safety-hatch `/bin/sh` trick, we forcibly re-write the header to be just the
+                # expected `#!python` shebang. We detect the end of the header with the known 1st
+                # line of console_script shim ~code defined in
+                # pex/vendor/_vendored/pip/pip/_vendor/distlib/scripts.py on line 41:
+                # https://github.com/pantsbuild/pex/blob/196b4cd5b8dd4b4af2586460530e9a777262be7d/pex/vendor/_vendored/pip/pip/_vendor/distlib/scripts.py#L41
+                scripts[script_path] = b"# -*- coding: utf-8 -*-"
+        if not scripts:
+            return
+
+        with closing(FileInput(files=scripts.keys(), inplace=True, mode="rb")) as script_fi:
+            first_non_shebang_line = None  # type: Optional[bytes]
+            for line in script_fi:
+                buffer = get_stdout_bytes_buffer()
+                if script_fi.isfirstline():
+                    first_non_shebang_line = scripts[script_fi.filename()]
+                    # Ensure python shebangs are reproducible. The only place these can be used is
+                    # in venv mode PEXes where the `#!python` placeholder shebang will be re-written
+                    # to use the venv's python interpreter.
+                    buffer.write(b"#!python\n")
+                elif (
+                    not first_non_shebang_line
+                    or cast(bytes, line).strip() == first_non_shebang_line
+                ):
+                    # N.B.: These lines include the newline already.
+                    buffer.write(cast(bytes, line))
+                    first_non_shebang_line = None
+
+    def _fixup_direct_url(self):
+        # type: () -> None
+        direct_url_relpath = self._find_dist_info_file("direct_url.json")
+        if direct_url_relpath:
+            direct_url_abspath = os.path.join(self.prefix_dir, direct_url_relpath)
+            with open(direct_url_abspath) as fp:
+                if urlparse.urlparse(json.load(fp)["url"]).scheme == "file":
+                    os.unlink(direct_url_abspath)

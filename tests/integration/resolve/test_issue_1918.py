@@ -1,9 +1,10 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import itertools
 import os.path
 import subprocess
+import sys
 
 import pytest
 
@@ -13,7 +14,6 @@ from pex.pip.version import PipVersion, PipVersionValue
 from pex.requirements import VCS
 from pex.resolve.locked_resolve import VCSArtifact
 from pex.resolve.lockfile import json_codec
-from pex.resolve.resolved_requirement import ArtifactURL
 from pex.resolve.resolver_configuration import ResolverVersion
 from pex.sorted_tuple import SortedTuple
 from pex.typing import TYPE_CHECKING
@@ -133,7 +133,7 @@ def test_redacted_requirement_handling(
 
     assert isinstance(artifact, VCSArtifact)
     assert VCS.Git is artifact.vcs
-    assert ArtifactURL.parse(expected_url) == artifact.url
+    assert expected_url == artifact.url
 
     pex_root = os.path.join(str(tmpdir), "pex_root")
     result = run_pex_command(

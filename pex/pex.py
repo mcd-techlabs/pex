@@ -1,25 +1,23 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import absolute_import
+from __future__ import absolute_import, print_function
 
 import ast
-import itertools
 import os
 import sys
-import warnings
 from site import USER_SITE
 from types import ModuleType
 
-from pex import bootstrap, pex_warnings
+from pex import bootstrap
 from pex.bootstrap import Bootstrap
 from pex.common import die
-from pex.dist_metadata import CallableEntryPoint, Distribution, EntryPoint
+from pex.dist_metadata import CallableEntryPoint, Distribution, EntryPoint, find_distributions
 from pex.environment import PEXEnvironment
 from pex.executor import Executor
 from pex.finders import get_entry_point_from_console_script, get_script_from_distributions
 from pex.inherit_path import InheritPath
-from pex.interpreter import PythonIdentity, PythonInterpreter
+from pex.interpreter import PythonInterpreter
 from pex.layout import Layout
 from pex.orderedset import OrderedSet
 from pex.pex_info import PexInfo
@@ -39,6 +37,7 @@ if TYPE_CHECKING:
         Mapping,
         NoReturn,
         Optional,
+        Set,
         Tuple,
         TypeVar,
         Union,
@@ -51,36 +50,34 @@ if TYPE_CHECKING:
 class IsolatedSysPath(object):
     @staticmethod
     def _expand_paths(*paths):
-        # type: (*str) -> OrderedSet[str]
-        def iter_synonyms(path):
+        # type: (*str) -> Iterator[str]
+        for path in paths:
             yield path
-            yield os.path.abspath(path)
+            if not os.path.isabs(path):
+                yield os.path.abspath(path)
             yield os.path.realpath(path)
-
-        return OrderedSet(itertools.chain.from_iterable(iter_synonyms(path) for path in paths))
 
     @classmethod
     def for_pex(
         cls,
-        interpreter,  # type: Union[PythonInterpreter, PythonIdentity]
+        interpreter,  # type: PythonInterpreter
         pex,  # type: str
         pex_pex=None,  # type: Optional[str]
     ):
         # type: (...) -> IsolatedSysPath
-        ident = interpreter.identity if isinstance(interpreter, PythonInterpreter) else interpreter
-        sys_path = OrderedSet(ident.sys_path)
+        sys_path = OrderedSet(interpreter.sys_path)
         sys_path.add(pex)
         sys_path.add(Bootstrap.locate().path)
         if pex_pex:
             sys_path.add(pex_pex)
 
         site_packages = OrderedSet()  # type: OrderedSet[str]
-        for site_lib in ident.site_packages:
+        for site_lib in interpreter.site_packages:
             TRACER.log("Discarding site packages path: {site_lib}".format(site_lib=site_lib))
-            site_packages.add(site_lib.path)
+            site_packages.add(site_lib)
 
         extras_paths = OrderedSet()  # type: OrderedSet[str]
-        for extras_path in ident.extras_paths:
+        for extras_path in interpreter.extras_paths:
             TRACER.log("Discarding site extras path: {extras_path}".format(extras_path=extras_path))
             extras_paths.add(extras_path)
 
@@ -88,7 +85,7 @@ class IsolatedSysPath(object):
             sys_path=sys_path,
             site_packages=site_packages,
             extras_paths=extras_paths,
-            is_venv=ident.is_venv,
+            is_venv=interpreter.is_venv,
         )
 
     def __init__(
@@ -275,7 +272,7 @@ class PEX(object):  # noqa: T000
                 # for performing needed patches to the `distutils` stdlib breaks.
                 #
                 # See:
-                # + https://github.com/pex-tool/pex/issues/992
+                # + https://github.com/pantsbuild/pex/issues/992
                 # + https://github.com/pypa/virtualenv/pull/1688
                 (not is_venv or module_name != "_virtualenv")
                 and module_file
@@ -335,30 +332,31 @@ class PEX(object):  # noqa: T000
     ):
         # type: (...) -> Tuple[List[str], Mapping[str, Any]]
         scrub_paths = OrderedSet()  # type: OrderedSet[str]
-        site_paths = OrderedSet()  # type: OrderedSet[str]
-        user_site_paths = OrderedSet()  # type: OrderedSet[str]
+        site_distributions = OrderedSet()  # type: OrderedSet[str]
+        user_site_distributions = OrderedSet()  # type: OrderedSet[str]
 
-        def all_paths(path):
+        def all_distribution_paths(path):
             # type: (Optional[str]) -> Iterable[str]
             if path is None:
                 return ()
-            return path, os.path.realpath(path)
+            locations = set(dist.location for dist in find_distributions(path))
+            return {path} | locations | set(os.path.realpath(path) for path in locations)
 
         for path_element in sys.path:
             if path_element not in isolated_sys_path:
                 TRACER.log("Tainted path element: %s" % path_element)
-                site_paths.update(all_paths(path_element))
+                site_distributions.update(all_distribution_paths(path_element))
             else:
                 TRACER.log("Not a tainted path element: %s" % path_element, V=2)
 
-        user_site_paths.update(all_paths(USER_SITE))
+        user_site_distributions.update(all_distribution_paths(USER_SITE))
 
         if inherit_path == InheritPath.FALSE:
-            scrub_paths = OrderedSet(site_paths)
-            scrub_paths.update(user_site_paths)
-            for path in user_site_paths:
+            scrub_paths = OrderedSet(site_distributions)
+            scrub_paths.update(user_site_distributions)
+            for path in user_site_distributions:
                 TRACER.log("Scrubbing from user site: %s" % path)
-            for path in site_paths:
+            for path in site_distributions:
                 TRACER.log("Scrubbing from site-packages: %s" % path)
 
         scrubbed_sys_path = list(OrderedSet(sys.path) - scrub_paths)
@@ -567,9 +565,6 @@ class PEX(object):  # noqa: T000
 
         self._clean_environment(strip_pex_env=self._pex_info.strip_pex_env)
 
-        for name, value in self._pex_info.inject_env.items():
-            os.environ.setdefault(name, value)
-
         if force_interpreter:
             TRACER.log("PEX_INTERPRETER specified, dropping into interpreter")
             return self.execute_interpreter()
@@ -598,6 +593,8 @@ class PEX(object):  # noqa: T000
                 EntryPoint.parse("run = {}".format(self._pex_info_overrides.entry_point))
             )
 
+        for name, value in self._pex_info.inject_env.items():
+            os.environ.setdefault(name, value)
         sys.argv[1:1] = list(self._pex_info.inject_args)
 
         if self._pex_info.script:
@@ -657,53 +654,20 @@ class PEX(object):  # noqa: T000
                 sys.argv = args
                 return self.execute_content(arg, content)
         else:
-            try:
+            if self._vars.PEX_INTERPRETER_HISTORY:
+                import atexit
                 import readline
-            except ImportError:
-                if self._vars.PEX_INTERPRETER_HISTORY:
-                    pex_warnings.warn(
-                        "PEX_INTERPRETER_HISTORY was requested which requires the `readline` "
-                        "module, but the current interpreter at {python} does not have readline "
-                        "support.".format(python=sys.executable)
-                    )
-            else:
-                # This import is used for its side effects by the parse_and_bind lines below.
-                import rlcompleter  # NOQA
 
-                # N.B.: This hacky method of detecting use of libedit for the readline
-                # implementation is the recommended means.
-                # See https://docs.python.org/3/library/readline.html
-                if "libedit" in readline.__doc__:
-                    # Mac can use libedit, and libedit has different config syntax.
-                    readline.parse_and_bind("bind ^I rl_complete")
-                else:
-                    readline.parse_and_bind("tab: complete")
-
+                histfile = os.path.expanduser(self._vars.PEX_INTERPRETER_HISTORY_FILE)
                 try:
-                    # Under current PyPy readline does not implement read_init_file and emits a
-                    # warning; so we squelch that noise.
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        readline.read_init_file()
-                except (IOError, OSError):
-                    # No init file (~/.inputrc for readline or ~/.editrc for libedit).
-                    pass
+                    readline.read_history_file(histfile)
+                    readline.set_history_length(1000)
+                except OSError as e:
+                    sys.stderr.write(
+                        "Failed to read history file at {} due to: {}".format(histfile, e)
+                    )
 
-                if self._vars.PEX_INTERPRETER_HISTORY:
-                    import atexit
-
-                    histfile = os.path.expanduser(self._vars.PEX_INTERPRETER_HISTORY_FILE)
-                    try:
-                        readline.read_history_file(histfile)
-                        readline.set_history_length(1000)
-                    except (IOError, OSError) as e:
-                        sys.stderr.write(
-                            "Failed to read history file at {path} due to: {err}\n".format(
-                                path=histfile, err=e
-                            )
-                        )
-
-                    atexit.register(readline.write_history_file, histfile)
+                atexit.register(readline.write_history_file, histfile)
 
             bootstrap.demote()
 

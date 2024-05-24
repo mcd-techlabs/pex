@@ -1,4 +1,4 @@
-# Copyright 2016 Pex project contributors.
+# Copyright 2016 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os

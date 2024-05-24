@@ -1,4 +1,4 @@
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -27,7 +27,7 @@ def register(
             "situations it's beneficial to split the venv installation into {deps} and "
             "{sources} steps. This is particularly useful when installing a PEX in a container "
             "image. See "
-            "https://docs.pex-tool.org/recipes.html#pex-app-in-a-container for more "
+            "https://pex.readthedocs.io/en/latest/recipes.html#pex-app-in-a-container for more "
             "information.".format(
                 all=InstallScope.ALL,
                 deps=InstallScope.DEPS_ONLY,

@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import glob
@@ -14,7 +14,7 @@ import colors
 import pytest
 
 from pex import dist_metadata
-from pex.common import open_zip, safe_open
+from pex.common import safe_open
 from pex.dist_metadata import ProjectNameAndVersion
 from pex.interpreter import PythonInterpreter
 from pex.pep_440 import Version
@@ -344,7 +344,7 @@ def test_issue_1413_portable_find_links(tmpdir):
             )
         )
 
-    repository_pex = os.path.join(str(tmpdir), "myappnotonpypi.pex")
+    repository_pex = os.path.join(str(tmpdir), "my-app-not-on-pypi.pex")
     run_pex_command(
         args=["-D", src, "ansicolors==1.1.8", "-m", "app", "--include-tools", "-o", repository_pex]
     ).assert_success()
@@ -362,14 +362,16 @@ def test_issue_1413_portable_find_links(tmpdir):
     # We should have only the sdist of the src/app.py source code available in the find-links repo.
     os.unlink(os.path.join(original_find_links, "ansicolors-1.1.8-py2.py3-none-any.whl"))
     assert 1 == len(os.listdir(original_find_links))
-    assert 1 == len(glob.glob(os.path.join(original_find_links, "myappnotonpypi-0.0.0*.tar.gz")))
+    assert 1 == len(
+        glob.glob(os.path.join(original_find_links, "my-app-not-on-pypi-0.0.0*.tar.gz"))
+    )
 
     lock = os.path.join(str(tmpdir), "lock")
     run_pex3(
         "lock",
         "create",
         "ansicolors==1.1.8",
-        "myappnotonpypi",
+        "my-app-not-on-pypi",
         "-f",
         original_find_links,
         "--path-mapping",
@@ -521,40 +523,3 @@ def test_issue_1717_transitive_extras(
     assert_requirements(pex_info)
     assert_dists(pex_info, "root", "middle_man_with_extras", "A", "extra1", "B", "extra2", "C")
     subprocess.check_call(args=test_pex_args)
-
-
-def test_resolve_wheel_files(tmpdir):
-    # type: (Any) -> None
-
-    lock = os.path.join(str(tmpdir), "lock")
-    # N.B.: We choose ansicolors 1.1.8 since it works with all Pythons and has a universal wheel
-    # published on PyPI and cowsay 5.0 since it also works with all Pythons and only has an sdist
-    # published on PyPI. This combination ensures the resolve process can handle both building
-    # wheels (cowsay stresses this) and using pre-existing ones (ansicolors stresses this).
-    run_pex3("lock", "create", "ansicolors==1.1.8", "cowsay==5.0", "-o", lock).assert_success()
-
-    pex = os.path.join(str(tmpdir), "pex")
-    exe = os.path.join(str(tmpdir), "exe")
-    with open(exe, "w") as fp:
-        fp.write("import colors, cowsay; cowsay.tux(colors.blue('Moo?'))")
-
-    run_pex_command(
-        args=["--lock", lock, "--no-pre-install-wheels", "-o", pex, "--exe", exe]
-    ).assert_success()
-
-    assert colors.blue("Moo?") in subprocess.check_output(args=[pex]).decode("utf-8")
-
-    pex_info = PexInfo.from_pex(pex)
-    assert frozenset(
-        (ProjectNameAndVersion("ansicolors", "1.1.8"), ProjectNameAndVersion("cowsay", "5.0"))
-    ) == frozenset(ProjectNameAndVersion.from_filename(dist) for dist in pex_info.distributions)
-
-    dist_dir = os.path.join(str(tmpdir), "dist_dir")
-    os.mkdir(dist_dir)
-    with open_zip(pex) as zfp:
-        for location, sha in pex_info.distributions.items():
-            dist_relpath = os.path.join(pex_info.internal_cache, location)
-            zfp.extract(dist_relpath, dist_dir)
-            assert sha == CacheHelper.hash(
-                os.path.join(dist_dir, dist_relpath), hasher=hashlib.sha256
-            )

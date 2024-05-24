@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -10,7 +10,7 @@ from pex.common import open_zip
 from pex.typing import TYPE_CHECKING, Generic
 
 if TYPE_CHECKING:
-    from typing import IO, Callable, Iterable, Iterator, Optional, Protocol, Text, Type, TypeVar
+    from typing import IO, Callable, Iterable, Iterator, Optional, Protocol, Type, TypeVar
 
     class HintedDigest(Protocol):
         @property
@@ -177,7 +177,7 @@ def update_hash(
 
 
 def file_hash(
-    path,  # type: Text
+    path,  # type: str
     digest,  # type: HintedDigest
 ):
     # type: (...) -> None
@@ -187,22 +187,21 @@ def file_hash(
 
 
 def dir_hash(
-    directory,  # type: Text
+    directory,  # type: str
     digest,  # type: HintedDigest
-    dir_filter=lambda d: True,  # type: Callable[[Text], bool]
-    file_filter=lambda f: True,  # type: Callable[[Text], bool]
+    dir_filter=lambda dirs: dirs,  # type: Callable[[Iterable[str]], Iterable[str]]
+    file_filter=lambda files: files,  # type: Callable[[Iterable[str]], Iterable[str]]
 ):
     # type: (...) -> None
     """Digest the contents of a directory in a reproducible manner."""
 
     def iter_files():
-        # type: () -> Iterator[Text]
+        # type: () -> Iterator[str]
         normpath = os.path.realpath(os.path.normpath(directory))
         for root, dirs, files in os.walk(normpath):
-            dirs[:] = [d for d in dirs if dir_filter(d)]
-            for f in files:
-                if file_filter(f):
-                    yield os.path.relpath(os.path.join(root, f), normpath)
+            dirs[:] = list(dir_filter(dirs))
+            for f in file_filter(files):
+                yield os.path.relpath(os.path.join(root, f), normpath)
 
     names = sorted(iter_files())
 
@@ -215,11 +214,11 @@ def dir_hash(
 
 
 def zip_hash(
-    zip_path,  # type: Text
+    zip_path,  # type: str
     digest,  # type: HintedDigest
-    relpath=None,  # type: Optional[Text]
-    dir_filter=lambda d: True,  # type: Callable[[Text], bool]
-    file_filter=lambda f: True,  # type: Callable[[Text], bool]
+    relpath=None,  # type: Optional[str]
+    dir_filter=lambda dirs: dirs,  # type: Callable[[Iterable[str]], Iterable[str]]
+    file_filter=lambda files: files,  # type: Callable[[Iterable[str]], Iterable[str]]
 ):
     # type: (...) -> None
     """Digest the contents of a zip file in a reproducible manner.
@@ -235,15 +234,19 @@ def zip_hash(
         )
 
         dirs = frozenset(name.rstrip("/") for name in namelist if name.endswith("/"))
-        accept_dirs = frozenset(d for d in dirs if dir_filter(os.path.basename(d)))
+        accept_dir_names = frozenset(dir_filter(os.path.basename(d) for d in dirs))
+        accept_dirs = frozenset(d for d in dirs if os.path.basename(d) in accept_dir_names)
         reject_dirs = dirs - accept_dirs
 
         accept_files = sorted(
-            name
-            for name in namelist
-            if not name.endswith("/")
-            and not any(name.startswith(reject_dir) for reject_dir in reject_dirs)
-            and file_filter(os.path.basename(name))
+            file_filter(
+                name
+                for name in namelist
+                if not (
+                    name.endswith("/")
+                    or any(name.startswith(reject_dir) for reject_dir in reject_dirs)
+                )
+            )
         )
 
         hashed_names = (

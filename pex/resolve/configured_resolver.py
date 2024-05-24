@@ -1,15 +1,14 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
 
 from pex import resolver
-from pex.pep_427 import InstallableType
 from pex.pip.version import PipVersion, PipVersionValue
 from pex.resolve import lock_resolver
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.resolver_configuration import PipConfiguration, ReposConfiguration, ResolverVersion
-from pex.resolve.resolvers import Resolver, ResolveResult
+from pex.resolve.resolvers import Installed, Resolver
 from pex.result import try_
 from pex.targets import Targets
 from pex.typing import TYPE_CHECKING
@@ -28,18 +27,14 @@ _DEFAULT_REPOS = ReposConfiguration.create()
 @attr.s(frozen=True)
 class ConfiguredResolver(Resolver):
     @classmethod
-    def version(cls, pip_version):
-        # type: (PipVersionValue) -> ConfiguredResolver
+    def default(cls):
+        # type: () -> ConfiguredResolver
+        pip_version = PipVersion.DEFAULT
         return cls(
             PipConfiguration(
                 version=pip_version, resolver_version=ResolverVersion.default(pip_version)
             )
         )
-
-    @classmethod
-    def default(cls):
-        # type: () -> ConfiguredResolver
-        return cls.version(PipVersion.DEFAULT)
 
     pip_configuration = attr.ib()  # type: PipConfiguration
 
@@ -51,9 +46,8 @@ class ConfiguredResolver(Resolver):
         lock,  # type: Lockfile
         targets=Targets(),  # type: Targets
         pip_version=None,  # type: Optional[PipVersionValue]
-        result_type=InstallableType.INSTALLED_WHEEL_CHROOT,  # type: InstallableType.Value
     ):
-        # type: (...) -> ResolveResult
+        # type: (...) -> Installed
         return try_(
             lock_resolver.resolve_from_lock(
                 targets=targets,
@@ -63,14 +57,17 @@ class ConfiguredResolver(Resolver):
                 find_links=self.pip_configuration.repos_configuration.find_links,
                 resolver_version=self.pip_configuration.resolver_version,
                 network_configuration=self.pip_configuration.network_configuration,
-                build_configuration=self.pip_configuration.build_configuration,
+                build=self.pip_configuration.allow_builds,
+                use_wheel=self.pip_configuration.allow_wheels,
+                prefer_older_binary=self.pip_configuration.prefer_older_binary,
+                use_pep517=self.pip_configuration.use_pep517,
+                build_isolation=self.pip_configuration.build_isolation,
                 compile=False,
                 transitive=self.pip_configuration.transitive,
                 verify_wheels=True,
                 max_parallel_jobs=self.pip_configuration.max_jobs,
                 pip_version=pip_version or self.pip_configuration.version,
                 use_pip_config=self.pip_configuration.use_pip_config,
-                result_type=result_type,
             )
         )
 
@@ -79,9 +76,8 @@ class ConfiguredResolver(Resolver):
         requirements,  # type: Iterable[str]
         targets=Targets(),  # type: Targets
         pip_version=None,  # type: Optional[PipVersionValue]
-        result_type=InstallableType.INSTALLED_WHEEL_CHROOT,  # type: InstallableType.Value
     ):
-        # type: (...) -> ResolveResult
+        # type: (...) -> Installed
         return resolver.resolve(
             targets=targets,
             requirements=requirements,
@@ -91,7 +87,11 @@ class ConfiguredResolver(Resolver):
             find_links=self.pip_configuration.repos_configuration.find_links,
             resolver_version=self.pip_configuration.resolver_version,
             network_configuration=self.pip_configuration.network_configuration,
-            build_configuration=self.pip_configuration.build_configuration,
+            build=self.pip_configuration.allow_builds,
+            use_wheel=self.pip_configuration.allow_wheels,
+            prefer_older_binary=self.pip_configuration.prefer_older_binary,
+            use_pep517=self.pip_configuration.use_pep517,
+            build_isolation=self.pip_configuration.build_isolation,
             compile=False,
             max_parallel_jobs=self.pip_configuration.max_jobs,
             ignore_errors=False,
@@ -99,5 +99,4 @@ class ConfiguredResolver(Resolver):
             pip_version=pip_version or self.pip_configuration.version,
             resolver=self,
             use_pip_config=self.pip_configuration.use_pip_config,
-            result_type=result_type,
         )

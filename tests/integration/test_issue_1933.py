@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -6,16 +6,23 @@ import subprocess
 
 import pytest
 
+from pex.common import is_exe
 from pex.typing import TYPE_CHECKING
-from testing import IS_X86_64, run_pex_command
-from testing.docker import skip_unless_docker
+from testing import IS_LINUX_ARM64, IS_MAC_ARM64, run_pex_command
 
 if TYPE_CHECKING:
     from typing import Any
 
 
-@pytest.mark.skipif(not IS_X86_64, reason="This test must run on an X86_64 platform.")
-@skip_unless_docker
+@pytest.mark.skipif(
+    IS_MAC_ARM64
+    or IS_LINUX_ARM64
+    or not any(
+        is_exe(os.path.join(entry, "docker"))
+        for entry in os.environ.get("PATH", os.path.defpath).split(os.pathsep)
+    ),
+    reason="This test needs docker to run, and must run on an X86_64 platform.",
+)
 def test_musllinux_wheels_resolved(
     tmpdir,  # type: Any
     pex_project_dir,  # type: str

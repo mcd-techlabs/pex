@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -25,7 +25,7 @@ from pex.typing import TYPE_CHECKING, cast
 from testing import devpi, pex_project_dir
 
 if TYPE_CHECKING:
-    from typing import Iterator, Tuple
+    from typing import Iterator, Mapping, Optional, Tuple
 
 
 def iter_test_control_env_vars():

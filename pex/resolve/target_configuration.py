@@ -1,9 +1,10 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
 
 import os
+from collections import OrderedDict
 
 from pex.interpreter import PythonInterpreter
 from pex.interpreter_constraints import (
@@ -19,7 +20,7 @@ from pex.typing import TYPE_CHECKING
 from pex.variables import ENV
 
 if TYPE_CHECKING:
-    from typing import FrozenSet, Iterator, Optional, Tuple
+    from typing import FrozenSet, Iterator, Optional, Set, Tuple
 
     import attr  # vendor:skip
 else:

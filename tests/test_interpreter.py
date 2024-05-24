@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import glob
@@ -15,10 +15,10 @@ import pytest
 
 from pex.common import chmod_plus_x, safe_mkdir, safe_mkdtemp, temporary_dir, touch
 from pex.executor import Executor
-from pex.interpreter import PythonInterpreter, create_shebang
+from pex.interpreter import PythonInterpreter
 from pex.jobs import Job
 from pex.pyenv import Pyenv
-from pex.typing import TYPE_CHECKING, cast
+from pex.typing import TYPE_CHECKING
 from pex.variables import ENV
 from testing import (
     PY38,
@@ -508,78 +508,3 @@ def test_sys_path(python):
         'Its expected the sys_path matches the runtime sys.path with the exception of the PWD ("") '
         "head entry."
     )
-
-
-def test_sys_path_leak_for_current(tmpdir):
-    # type: (Any) -> None
-
-    expected_sys_path = [
-        entry
-        for entry in json.loads(
-            subprocess.check_output(
-                args=[
-                    sys.executable,
-                    "-sE",
-                    "-c",
-                    "import json, sys; json.dump(sys.path, sys.stdout)",
-                ]
-            ).decode("utf-8")
-        )
-        # N.B.: We expect the PythonInterpreter infrastructure to elide the implicit "" / CWD
-        # sys.path entry.
-        if entry
-    ]
-    pex_root = os.path.join(str(tmpdir), "pex_root")
-
-    new_sys_path_entry = os.path.join(str(tmpdir), "not-interpreter-sys-path")
-    with ENV.patch(PEX_ROOT=pex_root), PythonInterpreter._cleared_memory_cache():
-        sys.path.append(new_sys_path_entry)
-        try:
-            assert tuple(expected_sys_path) == PythonInterpreter.get().sys_path
-        finally:
-            sys.path.pop()
-
-
-def test_create_shebang(tmpdir):
-    # type: (Any) -> None
-
-    python_exe = sys.executable
-
-    def execute_script(
-        max_shebang_length,  # type: int
-        *extra_args  # type: str
-    ):
-        # type: (...) -> str
-        with open(os.path.join(str(tmpdir), "script.py"), "w") as fp:
-            fp.write(
-                dedent(
-                    """\
-                    {shebang}
-
-                    import json
-                    import sys
-
-
-                    with open(sys.argv[0]) as fp:
-                        json.dump(dict(shebang=fp.readline(), argv=sys.argv), sys.stdout)
-                    """
-                ).format(
-                    shebang=create_shebang(
-                        python_exe=python_exe, max_shebang_length=max_shebang_length
-                    )
-                )
-            )
-        chmod_plus_x(fp.name)
-        result = json.loads(
-            subprocess.check_output(args=[fp.name] + list(extra_args)).decode("utf-8")
-        )
-        assert [fp.name] + list(extra_args) == result["argv"]
-        return cast(str, result["shebang"])
-
-    assert "#!{python_exe}\n".format(python_exe=python_exe) == execute_script(len(python_exe) * 2)
-    assert "#!{python_exe}\n".format(python_exe=python_exe) == execute_script(
-        len(python_exe) * 2, "foo"
-    )
-
-    assert "#!/bin/sh\n" == execute_script(len(python_exe) // 2)
-    assert "#!/bin/sh\n" == execute_script(len(python_exe) // 2, "bar", "baz")

@@ -1,23 +1,21 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-import json
 import os.path
 import shutil
 import subprocess
-from textwrap import dedent
 
 import pytest
 
 from pex.dist_metadata import Distribution
+from pex.interpreter import PythonInterpreter
 from pex.pep_503 import ProjectName
 from pex.typing import TYPE_CHECKING
 from pex.venv.virtualenv import InvalidVirtualenvError, Virtualenv
-from testing import VenvFactory, all_python_venvs
-from testing.docker import DockerVirtualenvRunner
+from testing import ALL_PY_VERSIONS, VenvFactory, all_python_venvs, ensure_python_venv
 
 if TYPE_CHECKING:
-    from typing import Any, Dict
+    from typing import Any, Callable, Dict, Tuple
 
 
 def test_invalid(tmpdir):
@@ -54,7 +52,7 @@ def test_enclosing(tmpdir):
 
 def index_distributions(venv):
     # type: (Virtualenv) -> Dict[ProjectName, Distribution]
-    return {dist.metadata.project_name: dist for dist in venv.iter_distributions(rescan=True)}
+    return {dist.metadata.project_name: dist for dist in venv.iter_distributions()}
 
 
 def test_iter_distributions_setuptools_not_leaked(tmpdir):
@@ -108,34 +106,3 @@ def test_iter_distributions_spaces(tmpdir):
     pip_dist = dists.get(ProjectName("pip"))
     assert pip_dist is not None, "Expected venv to have Pip installed."
     assert os.path.realpath(venv.site_packages_dir) == os.path.realpath(pip_dist.location)
-
-
-def test_multiple_site_packages_dirs(fedora39_virtualenv_runner):
-    # type: (DockerVirtualenvRunner) -> None
-
-    assert {
-        "site_packages_dir": "/virtualenv.venv/lib/python3.12/site-packages",
-        "purelib": "/virtualenv.venv/lib/python3.12/site-packages",
-        "platlib": "/virtualenv.venv/lib64/python3.12/site-packages",
-    } == json.loads(
-        fedora39_virtualenv_runner.run(
-            dedent(
-                """\
-                import json
-                import sys
-
-                from pex.venv.virtualenv import Virtualenv
-
-                venv = Virtualenv("/virtualenv.venv")
-                json.dump(
-                    {
-                        "site_packages_dir": venv.site_packages_dir,
-                        "purelib": venv.purelib,
-                        "platlib": venv.platlib,
-                    },
-                    sys.stdout
-                )
-                """
-            )
-        ).decode("utf-8")
-    )

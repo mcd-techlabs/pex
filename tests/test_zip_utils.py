@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import filecmp
@@ -14,7 +14,7 @@ import pytest
 from pex.common import open_zip
 from pex.typing import TYPE_CHECKING
 from pex.ziputils import Zip, ZipError
-from testing import PY_VER
+from testing import PY_VER, make_env
 
 if TYPE_CHECKING:
     from typing import Any
@@ -32,7 +32,7 @@ def test_zip64_fail_fast(tmpdir):
             "The zip at {path} requires Zip64 support.{eol}"
             "The disk_cd_record_count field of the EndOfCentralDirectoryRecord record has value "
             "65535 indicating Zip64 support is required, but Zip64 support is not implemented.{eol}"
-            "Please file an issue at https://github.com/pex-tool/pex/issues/new that includes "
+            "Please file an issue at https://github.com/pantsbuild/pex/issues/new that includes "
             "this full backtrace if you need this support.".format(path=zip_file, eol=os.linesep)
         ),
     ):

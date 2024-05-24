@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import json
@@ -17,12 +17,13 @@ import pytest
 from pex import resolver
 from pex.common import safe_mkdir, safe_open, temporary_dir
 from pex.compatibility import PY2, WINDOWS, to_bytes
-from pex.dist_metadata import Distribution
-from pex.interpreter import PythonIdentity, PythonInterpreter
+from pex.dist_metadata import Distribution, Requirement
+from pex.interpreter import PythonInterpreter
 from pex.pex import PEX, IsolatedSysPath
 from pex.pex_builder import PEXBuilder
 from pex.pex_info import PexInfo
 from pex.resolve.configured_resolver import ConfiguredResolver
+from pex.resolve.resolver_configuration import PipConfiguration
 from pex.typing import TYPE_CHECKING
 from pex.util import named_temporary_file
 from testing import (
@@ -221,7 +222,8 @@ def test_site_libs(tmpdir):
         site_packages = os.path.join(str(tmpdir), "site-packages")
         os.mkdir(site_packages)
         mock_site_packages.return_value = {site_packages}
-        site_libs = frozenset(entry.path for entry in PythonIdentity.get().site_packages)
+        with PythonInterpreter._cleared_memory_cache():
+            site_libs = PythonInterpreter.get().site_packages
         assert site_packages in site_libs
 
 
@@ -243,9 +245,10 @@ def test_site_libs_symlink(tmpdir):
         os.symlink(site_packages, site_packages_link)
         mock_site_packages.return_value = [site_packages_link]
 
-        isolated_sys_path = IsolatedSysPath.for_pex(
-            interpreter=PythonIdentity.get(), pex=os.devnull
-        )
+        with PythonInterpreter._cleared_memory_cache():
+            isolated_sys_path = IsolatedSysPath.for_pex(
+                interpreter=PythonInterpreter.get(), pex=os.devnull
+            )
         assert os.path.join(sys_path_entry, "module.py") in isolated_sys_path
         assert os.path.realpath(site_packages) not in isolated_sys_path
         assert site_packages_link not in isolated_sys_path
@@ -261,10 +264,11 @@ def test_site_libs_excludes_prefix():
     with mock.patch.object(
         site, "getsitepackages"
     ) as mock_site_packages, temporary_dir() as tempdir:
-        site_packages = os.path.realpath(os.path.join(tempdir, "site-packages"))
+        site_packages = os.path.join(tempdir, "site-packages")
         os.mkdir(site_packages)
         mock_site_packages.return_value = [site_packages, sys.prefix]
-        site_libs = tuple(entry.path for entry in PythonIdentity.get().site_packages)
+        with PythonInterpreter._cleared_memory_cache():
+            site_libs = PythonInterpreter.get().site_packages
         assert site_packages in site_libs
         assert sys.prefix not in site_libs
 
@@ -894,7 +898,7 @@ def test_pex_run_custom_setuptools_useable(
         requirements=[setuptools_requirement],
         resolver=ConfiguredResolver.default(),
     )
-    dists = [resolved_dist.distribution for resolved_dist in result.distributions]
+    dists = [installed_dist.distribution for installed_dist in result.installed_distributions]
     with temporary_dir() as temp_dir:
         pex = write_simple_pex(
             temp_dir,
@@ -919,7 +923,7 @@ def test_pex_run_conflicting_custom_setuptools_useable(
         requirements=[setuptools_requirement],
         resolver=ConfiguredResolver.default(),
     )
-    dists = [resolved_dist.distribution for resolved_dist in result.distributions]
+    dists = [installed_dist.distribution for installed_dist in result.installed_distributions]
     with temporary_dir() as temp_dir:
         pex = write_simple_pex(
             temp_dir,
@@ -946,7 +950,7 @@ def test_pex_run_custom_pex_useable():
         requirements=["pex=={}".format(old_pex_version), "setuptools==40.6.3"],
         resolver=ConfiguredResolver.default(),
     )
-    dists = [resolved_dist.distribution for resolved_dist in result.distributions]
+    dists = [installed_dist.distribution for installed_dist in result.installed_distributions]
     with temporary_dir() as temp_dir:
         from pex.version import __version__
 
@@ -985,7 +989,7 @@ def test_pex_run_custom_pex_useable():
 def test_interpreter_teardown_dev_null_unclosed_resource_warning_suppressed():
     # type: () -> None
 
-    # See https://github.com/pex-tool/pex/issues/1101 and
+    # See https://github.com/pantsbuild/pex/issues/1101 and
     # https://github.com/pantsbuild/pants/issues/11058 for the motivating issue.
     with temporary_dir() as pex_chroot:
         pex_builder = PEXBuilder(path=pex_chroot)

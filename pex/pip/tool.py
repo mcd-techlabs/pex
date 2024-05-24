@@ -1,11 +1,9 @@
 # coding=utf-8
-# Copyright 2019 Pex project contributors.
+# Copyright 2019 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, print_function
 
-import glob
-import hashlib
 import os
 import re
 import subprocess
@@ -13,31 +11,26 @@ import sys
 from collections import deque
 from tempfile import mkdtemp
 
-from pex import targets
-from pex.atomic_directory import atomic_directory
+from pex import dist_metadata, targets
 from pex.auth import PasswordEntry
 from pex.common import safe_mkdir, safe_mkdtemp
 from pex.compatibility import get_stderr_bytes_buffer, shlex_quote, urlparse
 from pex.interpreter import PythonInterpreter
 from pex.jobs import Job
 from pex.network_configuration import NetworkConfiguration
-from pex.pep_427 import install_wheel_interpreter
+from pex.pep_376 import Record
+from pex.pep_425 import CompatibilityTags
 from pex.pip import foreign_platform
-from pex.pip.download_observer import DownloadObserver
+from pex.pip.download_observer import DownloadObserver, PatchSet
 from pex.pip.log_analyzer import ErrorAnalyzer, ErrorMessage, LogAnalyzer, LogScrapeJob
 from pex.pip.tailer import Tailer
-from pex.pip.version import PipVersion, PipVersionValue
+from pex.pip.version import PipVersionValue
 from pex.platforms import Platform
-from pex.resolve.resolver_configuration import (
-    BuildConfiguration,
-    ReposConfiguration,
-    ResolverVersion,
-)
+from pex.resolve.resolver_configuration import ReposConfiguration, ResolverVersion
 from pex.targets import LocalInterpreter, Target
 from pex.tracer import TRACER
 from pex.typing import TYPE_CHECKING
 from pex.variables import ENV
-from pex.venv.virtualenv import Virtualenv
 
 if TYPE_CHECKING:
     from typing import (
@@ -236,10 +229,6 @@ class PipVenv(object):
         # type: (*str) -> List[str]
         return list(self._execute_args + args)
 
-    def get_interpreter(self):
-        # type: () -> PythonInterpreter
-        return Virtualenv(self.venv_dir).interpreter
-
 
 @attr.s(frozen=True)
 class Pip(object):
@@ -247,7 +236,6 @@ class Pip(object):
     _PATCHES_PACKAGE_NAME = "_pex_pip_patches"
 
     _pip = attr.ib()  # type: PipVenv
-    version = attr.ib()  # type: PipVersionValue
     _pip_cache = attr.ib()  # type: str
 
     @staticmethod
@@ -259,27 +247,22 @@ class Pip(object):
             else ResolverVersion.default()
         )
 
+    @classmethod
     def _calculate_resolver_version_args(
-        self,
+        cls,
         interpreter,  # type: PythonInterpreter
         package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
     ):
         # type: (...) -> Iterator[str]
-        resolver_version = self._calculate_resolver_version(
+        resolver_version = cls._calculate_resolver_version(
             package_index_configuration=package_index_configuration
         )
         # N.B.: The pip default resolver depends on the python it is invoked with. For Python 2.7
         # Pip defaults to the legacy resolver and for Python 3 Pip defaults to the 2020 resolver.
         # Further, Pip warns when you do not use the default resolver version for the interpreter
         # in play. To both avoid warnings and set the correct resolver version, we need
-        # to only set the resolver version when it's not the default for the interpreter in play.
-        # As an added constraint, the 2020-resolver feature was removed and made default in the
-        # Pip 22.3 release.
-        if (
-            resolver_version == ResolverVersion.PIP_2020
-            and interpreter.version[0] == 2
-            and self.version.version < PipVersion.v22_3.version
-        ):
+        # to only set the resolver version when it's not the default for the interpreter in play:
+        if resolver_version == ResolverVersion.PIP_2020 and interpreter.version[0] == 2:
             yield "--use-feature"
             yield "2020-resolver"
         elif resolver_version == ResolverVersion.PIP_LEGACY and interpreter.version[0] == 3:
@@ -348,7 +331,7 @@ class Pip(object):
         # Ensure the pip cache (`http/` and `wheels/` dirs) is housed in the same partition as the
         # temporary directories it creates. This is needed to ensure atomic filesystem operations
         # since Pip relies upon `shutil.move` which is only atomic when `os.rename` can be used.
-        # See https://github.com/pex-tool/pex/issues/1776 for an example of the issues non-atomic
+        # See https://github.com/pantsbuild/pex/issues/1776 for an example of the issues non-atomic
         # moves lead to in the `pip wheel` case.
         pip_tmpdir = os.path.join(self._pip_cache, ".tmp")
         safe_mkdir(pip_tmpdir)
@@ -361,7 +344,7 @@ class Pip(object):
             **extra_env
         ) as env:
             # Guard against API calls from environment with ambient PYTHONPATH preventing pip PEX
-            # bootstrapping. See: https://github.com/pex-tool/pex/issues/892
+            # bootstrapping. See: https://github.com/pantsbuild/pex/issues/892
             pythonpath = env.pop("PYTHONPATH", None)
             if pythonpath:
                 TRACER.log(
@@ -373,7 +356,7 @@ class Pip(object):
             # To uphold the Pex standard, force Pip to comply by re-directing stdout to stderr.
             #
             # See:
-            # + https://github.com/pex-tool/pex/issues/1267
+            # + https://github.com/pantsbuild/pex/issues/1267
             # + https://github.com/pypa/pip/issues/9420
             if "stdout" not in popen_kwargs:
                 popen_kwargs["stdout"] = sys.stderr.fileno()
@@ -410,36 +393,6 @@ class Pip(object):
         )
         return Job(command=command, process=process, finalizer=finalizer)
 
-    @staticmethod
-    def _iter_build_configuration_options(build_configuration):
-        # type: (BuildConfiguration) -> Iterator[str]
-
-        # N.B.: BuildConfiguration maintains invariants that ensure --only-binary, --no-binary,
-        # --prefer-binary, --use-pep517 and --no-build-isolation are coherent.
-
-        if not build_configuration.allow_builds:
-            yield "--only-binary"
-            yield ":all:"
-        elif not build_configuration.allow_wheels:
-            yield "--no-binary"
-            yield ":all:"
-        else:
-            for project in build_configuration.only_wheels:
-                yield "--only-binary"
-                yield str(project)
-            for project in build_configuration.only_builds:
-                yield "--no-binary"
-                yield str(project)
-
-        if build_configuration.prefer_older_binary:
-            yield "--prefer-binary"
-
-        if build_configuration.use_pep517 is not None:
-            yield "--use-pep517" if build_configuration.use_pep517 else "--no-use-pep517"
-
-        if not build_configuration.build_isolation:
-            yield "--no-build-isolation"
-
     def spawn_download_distributions(
         self,
         download_dir,  # type: str
@@ -450,26 +403,47 @@ class Pip(object):
         transitive=True,  # type: bool
         target=None,  # type: Optional[Target]
         package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
-        build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+        build=True,  # type: bool
+        use_wheel=True,  # type: bool
+        prefer_older_binary=False,  # type: bool
+        use_pep517=None,  # type: Optional[bool]
+        build_isolation=True,  # type: bool
         observer=None,  # type: Optional[DownloadObserver]
         preserve_log=False,  # type: bool
     ):
         # type: (...) -> Job
         target = target or targets.current()
 
-        if not build_configuration.allow_wheels and not isinstance(target, LocalInterpreter):
-            raise ValueError(
-                "Cannot ignore wheels (use_wheel=False) when resolving for a platform: "
-                "{}".format(target.platform)
-            )
+        if not use_wheel:
+            if not build:
+                raise ValueError(
+                    "Cannot both ignore wheels (use_wheel=False) and refrain from building "
+                    "distributions (build=False)."
+                )
+            elif not isinstance(target, LocalInterpreter):
+                raise ValueError(
+                    "Cannot ignore wheels (use_wheel=False) when resolving for a platform: "
+                    "{}".format(target.platform)
+                )
 
         download_cmd = ["download", "--dest", download_dir]
         extra_env = {}  # type: Dict[str, str]
-        pex_extra_sys_path = []  # type: List[str]
 
-        download_cmd.extend(self._iter_build_configuration_options(build_configuration))
-        if not build_configuration.build_isolation:
-            pex_extra_sys_path.extend(sys.path)
+        if not build:
+            download_cmd.extend(["--only-binary", ":all:"])
+
+        if not use_wheel:
+            download_cmd.extend(["--no-binary", ":all:"])
+
+        if prefer_older_binary:
+            download_cmd.append("--prefer-binary")
+
+        if use_pep517 is not None:
+            download_cmd.append("--use-pep517" if use_pep517 else "--no-use-pep517")
+
+        if not build_isolation:
+            download_cmd.append("--no-build-isolation")
+            extra_env.update(PEP517_BACKEND_PATH=os.pathsep.join(sys.path))
 
         if allow_prereleases:
             download_cmd.append("--pre")
@@ -501,6 +475,7 @@ class Pip(object):
             )
 
         log_analyzers = []  # type: List[LogAnalyzer]
+        pex_extra_sys_path = []  # type: List[str]
         for obs in (foreign_platform_observer, observer):
             if obs:
                 if obs.analyzer:
@@ -509,10 +484,10 @@ class Pip(object):
                 extra_sys_path = obs.patch_set.emit_patches(package=self._PATCHES_PACKAGE_NAME)
                 if extra_sys_path:
                     pex_extra_sys_path.append(extra_sys_path)
-                    extra_env[self._PATCHES_PACKAGE_ENV_VAR_NAME] = self._PATCHES_PACKAGE_NAME
 
         if pex_extra_sys_path:
             extra_env["PEX_EXTRA_SYS_PATH"] = os.pathsep.join(pex_extra_sys_path)
+            extra_env[self._PATCHES_PACKAGE_ENV_VAR_NAME] = self._PATCHES_PACKAGE_NAME
 
         # The Pip 2020 resolver hides useful dependency conflict information in stdout interspersed
         # with other information we want to suppress. We jump though some hoops here to get at that
@@ -591,49 +566,33 @@ class Pip(object):
         else:
             return Job(command, process)
 
-    def _ensure_wheel_installed(self, package_index_configuration=None):
-        # type: (Optional[PackageIndexConfiguration]) -> None
-        pip_interpreter = self._pip.get_interpreter()
-        with atomic_directory(
-            os.path.join(
-                self._pip_cache,
-                ".wheel-install",
-                hashlib.sha1(pip_interpreter.binary.encode("utf-8")).hexdigest(),
-            )
-        ) as atomic_dir:
-            if not atomic_dir.is_finalized():
-                self.spawn_download_distributions(
-                    download_dir=atomic_dir.work_dir,
-                    requirements=[self.version.wheel_requirement],
-                    package_index_configuration=package_index_configuration,
-                    build_configuration=BuildConfiguration.create(allow_builds=False),
-                ).wait()
-                for wheel in glob.glob(os.path.join(atomic_dir.work_dir, "*.whl")):
-                    install_wheel_interpreter(wheel_path=wheel, interpreter=pip_interpreter)
-
     def spawn_build_wheels(
         self,
         distributions,  # type: Iterable[str]
         wheel_dir,  # type: str
         interpreter=None,  # type: Optional[PythonInterpreter]
         package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
-        build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+        prefer_older_binary=False,  # type: bool
+        use_pep517=None,  # type: Optional[bool]
+        build_isolation=True,  # type: bool
         verify=True,  # type: bool
     ):
         # type: (...) -> Job
-
-        if self.version is PipVersion.VENDORED:
-            self._ensure_wheel_installed(package_index_configuration=package_index_configuration)
-
         wheel_cmd = ["wheel", "--no-deps", "--wheel-dir", wheel_dir]
         extra_env = {}  # type: Dict[str, str]
 
-        # It's not clear if Pip's implementation of PEP-517 builds respects all build configuration
-        # options for resolving build dependencies, but in case it does, we pass them all.
-        wheel_cmd.extend(self._iter_build_configuration_options(build_configuration))
-        if not build_configuration.build_isolation:
+        # It's not clear if Pip's implementation of PEP-517 builds respects this option for
+        # resolving build dependencies, but in case it is we pass it.
+        if use_pep517 is not False and prefer_older_binary:
+            wheel_cmd.append("--prefer-binary")
+
+        if use_pep517 is not None:
+            wheel_cmd.append("--use-pep517" if use_pep517 else "--no-use-pep517")
+
+        if not build_isolation:
+            wheel_cmd.append("--no-build-isolation")
             interpreter = interpreter or PythonInterpreter.get()
-            extra_env.update(PEX_EXTRA_SYS_PATH=os.pathsep.join(interpreter.sys_path))
+            extra_env.update(PEP517_BACKEND_PATH=os.pathsep.join(interpreter.sys_path))
 
         if not verify:
             wheel_cmd.append("--no-verify")
@@ -645,6 +604,89 @@ class Pip(object):
             # If the build leverages PEP-518 it will need to resolve build requirements.
             package_index_configuration=package_index_configuration,
             interpreter=interpreter,
+            extra_env=extra_env,
+        )
+
+    def spawn_install_wheel(
+        self,
+        wheel,  # type: str
+        install_dir,  # type: str
+        compile=False,  # type: bool
+        target=None,  # type: Optional[Target]
+    ):
+        # type: (...) -> Job
+
+        project_name_and_version = dist_metadata.project_name_and_version(wheel)
+        assert project_name_and_version is not None, (
+            "Should never fail to parse a wheel path into a project name and version, but "
+            "failed to parse these from: {wheel}".format(wheel=wheel)
+        )
+
+        target = target or targets.current()
+        interpreter = target.get_interpreter()
+        if target.is_foreign:
+            if compile:
+                raise ValueError(
+                    "Cannot compile bytecode for {} using {} because the wheel has a foreign "
+                    "platform.".format(wheel, interpreter)
+                )
+
+        install_cmd = [
+            "install",
+            "--no-deps",
+            "--no-index",
+            "--only-binary",
+            ":all:",
+            # In `--prefix` scheme, Pip warns about installed scripts not being on $PATH. We fix
+            # this when a PEX is turned into a venv.
+            "--no-warn-script-location",
+            # In `--prefix` scheme, Pip normally refuses to install a dependency already in the
+            # `sys.path` of Pip itself since the requirement is already satisfied. Since `pip`,
+            # `setuptools` and `wheel` are always in that `sys.path` (Our `pip.pex` venv PEX), we
+            # force installation so that PEXes with dependencies on those projects get them properly
+            # installed instead of skipped.
+            "--force-reinstall",
+            "--ignore-installed",
+            # We're potentially installing a wheel for a foreign platform. This is just an
+            # unpacking operation though; so we don't actually need to perform it with a target
+            # platform compatible interpreter (except for scripts - which we deal with in fixup
+            # install below).
+            "--ignore-requires-python",
+            "--prefix",
+            install_dir,
+        ]
+
+        # The `--prefix` scheme causes Pip to refuse to install foreign wheels. It assumes those
+        # wheels must be compatible with the current venv. Since we just install wheels in
+        # individual chroots for later re-assembly on the `sys.path` at runtime or at venv install
+        # time, we override this concern by forcing the wheel's tags to be considered compatible
+        # with the current Pip install interpreter being used.
+        compatible_tags = CompatibilityTags.from_wheel(wheel).extend(
+            interpreter.identity.supported_tags
+        )
+        patch_set = PatchSet.create(foreign_platform.patch_tags(compatible_tags))
+        extra_env = dict(patch_set.env)
+        extra_sys_path = patch_set.emit_patches(package=self._PATCHES_PACKAGE_NAME)
+        if extra_sys_path:
+            extra_env["PEX_EXTRA_SYS_PATH"] = extra_sys_path
+            extra_env[self._PATCHES_PACKAGE_ENV_VAR_NAME] = self._PATCHES_PACKAGE_NAME
+        install_cmd.append("--compile" if compile else "--no-compile")
+        install_cmd.append(wheel)
+
+        def fixup_install(returncode):
+            if returncode != 0:
+                return
+            record = Record.from_prefix_install(
+                prefix_dir=install_dir,
+                project_name=project_name_and_version.project_name,
+                version=project_name_and_version.version,
+            )
+            record.fixup_install(interpreter=interpreter)
+
+        return self._spawn_pip_isolated_job(
+            args=install_cmd,
+            interpreter=interpreter,
+            finalizer=fixup_install,
             extra_env=extra_env,
         )
 

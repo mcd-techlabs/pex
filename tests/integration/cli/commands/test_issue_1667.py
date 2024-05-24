@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -32,11 +32,9 @@ def test_interpreter_constraints_range_coverage(
     # type: (...) -> None
 
     # The traitlets 5.2.2 release breaks IPython.
-    # The prompt-toolkit 3.0.42 release breaks under pypy3.10.
     constraints = os.path.join(str(tmpdir), "constraints.txt")
     with open(constraints, "w") as fp:
         fp.write("traitlets<5.2.2\n")
-        fp.write("prompt-toolkit<3.0.42\n")
 
     # We lock with an unconstrained IPython requirement and we know IPython latest does not support
     # Python 3.7. If locking respects ICs it should not pick latest, but a version that supports at

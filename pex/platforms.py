@@ -1,4 +1,4 @@
-# Copyright 2017 Pex project contributors.
+# Copyright 2017 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -82,7 +82,7 @@ class Platform(object):
                     You may be forced to specify this form when resolves encounter environment
                     markers that use `python_full_version`. See the `--complete-platform` help as
                     well as:
-                    + https://docs.pex-tool.org/buildingpex.html#complete-platform
+                    + https://pex.readthedocs.io/en/latest/buildingpex.html#complete-platform
                     + https://www.python.org/dev/peps/pep-0508/#environment-markers
                     """
                 )
@@ -235,10 +235,11 @@ class Platform(object):
                     raise AssertionError("Finished with count {}.".format(count))
 
         from pex.resolve.configured_resolver import ConfiguredResolver
+        from pex.resolve.resolver_configuration import PipConfiguration
 
         job = SpawnedJob.stdout(
             # TODO(John Sirois): Plumb pip_version and the user-configured resolver:
-            #  https://github.com/pex-tool/pex/issues/1894
+            #  https://github.com/pantsbuild/pex/issues/1894
             job=get_pip(resolver=ConfiguredResolver.default()).spawn_debug(
                 platform=self, manylinux=manylinux
             ),

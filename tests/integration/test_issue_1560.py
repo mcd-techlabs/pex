@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -6,8 +6,17 @@ import subprocess
 
 import pytest
 
+from pex.interpreter import PythonInterpreter
 from pex.typing import TYPE_CHECKING
-from testing import IntegResults, VenvFactory, all_python_venvs, make_source_dir, run_pex_command
+from testing import (
+    ALL_PY_VERSIONS,
+    IntegResults,
+    VenvFactory,
+    all_python_venvs,
+    ensure_python_venv,
+    make_source_dir,
+    run_pex_command,
+)
 
 if TYPE_CHECKING:
     from typing import Any
@@ -32,20 +41,16 @@ def test_build_isolation(
     # type: (...) -> None
 
     python, pip = venv_factory.create_venv()
+    result = run_pex_command(args=[pex_project_dir, "--no-build-isolation"], python=python)
+    result.assert_failure()
+    assert "raise BackendUnavailable(" in result.error, (
+        "With build isolation turned off, it's expected that any build requirements (flit for Pex) "
+        "are pre-installed. They are not; so we expect a failure here."
+    )
 
     pyproject = toml.load(os.path.join(pex_project_dir, "pyproject.toml"))
     build_requirements = pyproject["build-system"]["requires"]
     assert len(build_requirements) > 0
-
-    subprocess.check_call(args=[pip, "uninstall", "-y"] + build_requirements)
-    result = run_pex_command(args=[pex_project_dir, "--no-build-isolation"], python=python)
-    result.assert_failure()
-    assert "ModuleNotFoundError: " in result.error, (
-        "With build isolation turned off, it's expected that any build requirements "
-        "(setuptools for Pex) are pre-installed. They are not; so we expect a failure here. Got:\n"
-        "{error}".format(error=result.error)
-    )
-
     subprocess.check_call(args=[pip, "install"] + build_requirements)
 
     pex = os.path.join(str(tmpdir), "pex")
@@ -55,15 +60,15 @@ def test_build_isolation(
     subprocess.check_call(args=[python, pex, "-c", "import pex"])
 
 
-def test_pep_517_for_pep_517_project():
-    # type: () -> None
+def test_pep_517_for_pep_517_project(pex_project_dir):
+    # type: (str) -> None
 
-    # N.B.: The flit_core project has a PEP-517 build with no fallback to `setup.py`.
+    # N.B.: Pex has a PEP-517 build with no fallback to `setup.py`.
 
     def build_pex(*extra_args):
         # type: (*str) -> IntegResults
         return run_pex_command(
-            args=["flit_core>=2,<4", "--no-wheel"] + list(extra_args) + ["--", "-c", "import pex"]
+            args=[pex_project_dir] + list(extra_args) + ["--", "-c", "import pex"]
         )
 
     build_pex().assert_success()

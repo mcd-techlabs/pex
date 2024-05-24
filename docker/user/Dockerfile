@@ -1,5 +1,5 @@
 ARG BASE_IMAGE_TAG=latest
-FROM ghcr.io/pex-tool/pex/base:${BASE_IMAGE_TAG}
+FROM ghcr.io/pantsbuild/pex/base:${BASE_IMAGE_TAG}
 
 # Prepare developer shim that can operate on local files and not mess up perms in the process.
 ARG USER
@@ -24,6 +24,17 @@ ENV _PEX_TEST_DEV_ROOT=/development/pex_dev
 # This will be a named volume used to persist the Pex cache on the host but isolated from the nost
 # ~/.pex cache.
 VOLUME "/home/${USER}/.pex"
+
+RUN mkdir -p  \
+    /development/pex \
+    /development/pex/.tox \
+    /development/pex_dev \
+    "/home/${USER}/.pex" && \
+  chown -R "${UID}:${GID}" \
+    /development/pex \
+    /development/pex/.tox \
+    /development/pex_dev \
+    "/home/${USER}/.pex"
 
 # This will be a named volume used to persist the pytest tmp tree (/tmp/pytest-of-$USER/) for use \
 # in `./dtox inspect` sessions.

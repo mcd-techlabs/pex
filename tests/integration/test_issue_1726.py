@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -62,8 +62,6 @@ def test_check_install_issue_1726(
         src,
         "--constraints",
         constraints,
-        "--resolver-version",
-        "pip-2020-resolver",
         "--",
         "-c",
         "from jaraco import collections; print(collections.__file__)",

@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -21,7 +21,7 @@ from pex.resolve.locked_resolve import (
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.path_mappings import PathMappings
 from pex.resolve.resolved_requirement import Fingerprint, Pin
-from pex.resolve.resolver_configuration import BuildConfiguration, PipConfiguration, ResolverVersion
+from pex.resolve.resolver_configuration import PipConfiguration, ResolverVersion
 from pex.sorted_tuple import SortedTuple
 from pex.third_party.packaging import tags
 from pex.third_party.packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -156,18 +156,6 @@ def loads(
             enum_type=enum_type, value=value, path='{path}["{key}"]'.format(path=path, key=key)
         )
 
-    def parse_project_name(
-        raw_project_name,  # type: str
-        path,  # type: str
-    ):
-        # type: (...) -> ProjectName
-        try:
-            return ProjectName(raw_project_name, validated=True)
-        except ProjectName.InvalidError as e:
-            raise ParseError(
-                "The project name string at '{path}' is invalid: {err}".format(path=path, err=e)
-            )
-
     def parse_requirement(
         raw_requirement,  # type: str
         path,  # type: str
@@ -209,25 +197,13 @@ def loads(
         for index, target_system in enumerate(get("target_systems", list, optional=True) or ())
     ]
 
-    only_wheels = [
-        parse_project_name(project_name, path=".only_wheels[{index}]".format(index=index))
-        for index, project_name in enumerate(get("only_wheels", list, optional=True) or ())
-    ]
-
-    only_builds = [
-        parse_project_name(project_name, path=".only_builds[{index}]".format(index=index))
-        for index, project_name in enumerate(get("only_builds", list, optional=True) or ())
-    ]
-
     requirements = [
         parse_requirement(req, path=".requirements[{index}]".format(index=index))
         for index, req in enumerate(get("requirements", list))
     ]
 
     constraints = [
-        parse_requirement(
-            constraint, path=".constraints[{index}]".format(index=index)
-        ).as_constraint()
+        parse_requirement(constraint, path=".constraints[{index}]".format(index=index))
         for index, constraint in enumerate(get("constraints", list))
     ]
 
@@ -334,15 +310,11 @@ def loads(
         requirements=requirements,
         constraints=constraints,
         allow_prereleases=get("allow_prereleases", bool),
-        build_configuration=BuildConfiguration.create(
-            allow_wheels=get("allow_wheels", bool),
-            only_wheels=only_wheels,
-            allow_builds=get("allow_builds", bool),
-            only_builds=only_builds,
-            prefer_older_binary=get("prefer_older_binary", bool),
-            use_pep517=get("use_pep517", bool, optional=True),
-            build_isolation=get("build_isolation", bool),
-        ),
+        allow_wheels=get("allow_wheels", bool),
+        allow_builds=get("allow_builds", bool),
+        prefer_older_binary=get("prefer_older_binary", bool),
+        use_pep517=get("use_pep517", bool, optional=True),
+        build_isolation=get("build_isolation", bool),
         transitive=get("transitive", bool),
         locked_resolves=locked_resolves,
         source=source,
@@ -381,9 +353,7 @@ def as_json_data(
         "constraints": [str(constraint) for constraint in lockfile.constraints],
         "allow_prereleases": lockfile.allow_prereleases,
         "allow_wheels": lockfile.allow_wheels,
-        "only_wheels": [str(project_name) for project_name in lockfile.only_wheels],
         "allow_builds": lockfile.allow_builds,
-        "only_builds": [str(project_name) for project_name in lockfile.only_builds],
         "prefer_older_binary": lockfile.prefer_older_binary,
         "use_pep517": lockfile.use_pep517,
         "build_isolation": lockfile.build_isolation,
@@ -413,7 +383,7 @@ def as_json_data(
                         else None,
                         "artifacts": [
                             {
-                                "url": path_mappings.maybe_canonicalize(artifact.url.download_url),
+                                "url": path_mappings.maybe_canonicalize(artifact.url),
                                 "algorithm": artifact.fingerprint.algorithm,
                                 "hash": artifact.fingerprint.hash,
                             }

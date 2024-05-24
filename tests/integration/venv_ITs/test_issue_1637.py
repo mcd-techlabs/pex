@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -10,7 +10,7 @@ from colors import yellow
 
 from pex.common import safe_open, touch
 from pex.typing import TYPE_CHECKING
-from testing import make_env, run_pex_command
+from testing import IS_PYPY3, make_env, run_pex_command
 
 if TYPE_CHECKING:
     from typing import Any, Iterable, List, Text

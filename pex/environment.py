@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -12,16 +12,15 @@ from collections import OrderedDict, defaultdict
 from pex import dist_metadata, pex_warnings, targets
 from pex.common import pluralize
 from pex.dist_metadata import Distribution, Requirement
-from pex.exclude_configuration import ExcludeConfiguration
 from pex.fingerprinted_distribution import FingerprintedDistribution
 from pex.inherit_path import InheritPath
 from pex.interpreter import PythonInterpreter
-from pex.layout import ensure_installed, identify_layout
+from pex.layout import maybe_install
 from pex.orderedset import OrderedSet
 from pex.pep_425 import CompatibilityTags, TagRank
 from pex.pep_503 import ProjectName
 from pex.pex_info import PexInfo
-from pex.targets import Target
+from pex.targets import LocalInterpreter, Target
 from pex.third_party.packaging import specifiers
 from pex.tracer import TRACER
 from pex.typing import TYPE_CHECKING
@@ -36,14 +35,11 @@ if TYPE_CHECKING:
         List,
         MutableMapping,
         Optional,
-        Text,
         Tuple,
         Union,
     )
 
     import attr  # vendor:skip
-
-    from pex.pep_427 import InstallableType  # noqa
 else:
     from pex.third_party import attr
 
@@ -192,13 +188,12 @@ class ResolveError(Exception):
 
 
 @attr.s(frozen=True)
-class _RequirementKey(object):
+class _RequirementKey(ProjectName):
     @classmethod
     def create(cls, requirement):
         # type: (Requirement) -> _RequirementKey
-        return cls(ProjectName(requirement.name), frozenset(requirement.extras))
+        return cls(requirement.name, frozenset(requirement.extras))
 
-    project_name = attr.ib()  # type: ProjectName
     extras = attr.ib()  # type: FrozenSet[str]
 
     def satisfied_keys(self):
@@ -214,7 +209,7 @@ class _RequirementKey(object):
         items = list(self.extras)
         for size in range(len(items) + 1):
             for combination_of_size in itertools.combinations(items, size):
-                yield _RequirementKey(self.project_name, frozenset(combination_of_size))
+                yield _RequirementKey(self.raw, frozenset(combination_of_size))
 
 
 class PEXEnvironment(object):
@@ -242,8 +237,8 @@ class PEXEnvironment(object):
         mounted = cls._CACHE.get(key)
         if mounted is None:
             pex_root = pex_info.pex_root
-            installed_pex = ensure_installed(pex=pex, pex_root=pex_root, pex_hash=pex_hash)
-            mounted = cls(pex=installed_pex, pex_info=pex_info, target=target, source_pex=pex)
+            pex = maybe_install(pex=pex, pex_root=pex_root, pex_hash=pex_hash) or pex
+            mounted = cls(pex=pex, pex_info=pex_info, target=target)
             cls._CACHE[key] = mounted
         return mounted
 
@@ -252,13 +247,11 @@ class PEXEnvironment(object):
         pex,  # type: str
         pex_info=None,  # type: Optional[PexInfo]
         target=None,  # type: Optional[Target]
-        source_pex=None,  # type: Optional[str]
     ):
         # type: (...) -> None
         self._pex = os.path.realpath(pex)
         self._pex_info = pex_info or PexInfo.from_pex(pex)
         self._target = target or targets.current()
-        self._source_pex = os.path.realpath(source_pex) if source_pex else None
 
         self._available_ranked_dists_by_project_name = defaultdict(
             list
@@ -274,45 +267,16 @@ class PEXEnvironment(object):
         # type: () -> str
         return self._pex
 
-    @property
-    def source_pex(self):
-        # type: () -> str
-        return self._source_pex or self._pex
-
-    def iter_distributions(self, result_type_wheel_file=False):
-        # type: (bool) -> Iterator[FingerprintedDistribution]
-        if result_type_wheel_file:
-            if not self._pex_info.deps_are_wheel_files:
-                raise ResolveError(
-                    "Cannot resolve .whl files from PEX at {pex}; its dependencies are in the "
-                    "form of pre-installed wheel chroots.".format(pex=self.source_pex)
+    def iter_distributions(self):
+        # type: () -> Iterator[FingerprintedDistribution]
+        internal_cache = os.path.join(self._pex, self._pex_info.internal_cache)
+        with TRACER.timed("Searching dependency cache: %s" % internal_cache, V=2):
+            for distribution_name, fingerprint in self._pex_info.distributions.items():
+                dist_path = os.path.join(internal_cache, distribution_name)
+                yield FingerprintedDistribution(
+                    distribution=Distribution.load(dist_path),
+                    fingerprint=fingerprint,
                 )
-            with TRACER.timed(
-                "Searching dependency cache: {cache}".format(
-                    cache=os.path.join(self.source_pex, self._pex_info.internal_cache)
-                ),
-                V=2,
-            ):
-                with identify_layout(self.source_pex) as layout:
-                    for distribution_name, fingerprint in self._pex_info.distributions.items():
-                        dist_relpath = os.path.join(
-                            self._pex_info.internal_cache, distribution_name
-                        )
-                        yield FingerprintedDistribution(
-                            distribution=Distribution.load(layout.wheel_file_path(dist_relpath)),
-                            fingerprint=fingerprint,
-                        )
-        else:
-            internal_cache = os.path.join(self._pex, self._pex_info.internal_cache)
-            with TRACER.timed(
-                "Searching dependency cache: {cache}".format(cache=internal_cache), V=2
-            ):
-                for distribution_name, fingerprint in self._pex_info.distributions.items():
-                    dist_path = os.path.join(internal_cache, distribution_name)
-                    yield FingerprintedDistribution(
-                        distribution=Distribution.load(dist_path),
-                        fingerprint=fingerprint,
-                    )
 
     def _update_candidate_distributions(self, distribution_iter):
         # type: (Iterable[FingerprintedDistribution]) -> None
@@ -380,7 +344,6 @@ class PEXEnvironment(object):
     def _resolve_requirement(
         self,
         requirement,  # type: Requirement
-        exclude_configuration,  # type: ExcludeConfiguration
         resolved_dists_by_key,  # type: MutableMapping[_RequirementKey, FingerprintedDistribution]
         required,  # type: bool
         required_by=None,  # type: Optional[Distribution]
@@ -388,16 +351,6 @@ class PEXEnvironment(object):
         # type: (...) -> Iterator[_DistributionNotFound]
         requirement_key = _RequirementKey.create(requirement)
         if requirement_key in resolved_dists_by_key:
-            return
-
-        excluded_by = exclude_configuration.excluded_by(requirement)
-        if excluded_by:
-            TRACER.log(
-                "Skipping resolving {requirement}: excluded by {excludes}".format(
-                    requirement=requirement,
-                    excludes=" and ".join(map(str, excluded_by)),
-                )
-            )
             return
 
         available_distributions = [
@@ -452,7 +405,6 @@ class PEXEnvironment(object):
 
             for not_found in self._resolve_requirement(
                 dep_requirement,
-                exclude_configuration,
                 resolved_dists_by_key,
                 required,
                 required_by=resolved_distribution.distribution,
@@ -549,32 +501,16 @@ class PEXEnvironment(object):
         # type: () -> Iterable[Distribution]
         if self._resolved_dists is None:
             all_reqs = [Requirement.parse(req) for req in self._pex_info.requirements]
-            exclude_configuration = ExcludeConfiguration.create(excluded=self._pex_info.excluded)
             self._resolved_dists = tuple(
                 fingerprinted_distribution.distribution
-                for fingerprinted_distribution in self.resolve_dists(
-                    all_reqs, exclude_configuration=exclude_configuration
-                )
+                for fingerprinted_distribution in self.resolve_dists(all_reqs)
             )
         return self._resolved_dists
 
-    def resolve_dists(
-        self,
-        reqs,  # type: Iterable[Requirement]
-        exclude_configuration=ExcludeConfiguration(),  # type: ExcludeConfiguration
-        result_type=None,  # type: Optional[InstallableType.Value]
-    ):
-        # type: (...) -> Iterable[FingerprintedDistribution]
+    def resolve_dists(self, reqs):
+        # type: (Iterable[Requirement]) -> Iterable[FingerprintedDistribution]
 
-        result_type_wheel_file = False
-        if result_type is not None:
-            from pex.pep_427 import InstallableType
-
-            result_type_wheel_file = result_type is InstallableType.WHEEL_FILE
-
-        self._update_candidate_distributions(
-            self.iter_distributions(result_type_wheel_file=result_type_wheel_file)
-        )
+        self._update_candidate_distributions(self.iter_distributions())
 
         unresolved_reqs = OrderedDict()  # type: OrderedDict[Requirement, OrderedSet]
 
@@ -599,7 +535,6 @@ class PEXEnvironment(object):
             with TRACER.timed("Resolving {}".format(qualified_req_or_not_found.requirement), V=2):
                 for not_found in self._resolve_requirement(
                     requirement=qualified_req_or_not_found.requirement,
-                    exclude_configuration=exclude_configuration,
                     required=qualified_req_or_not_found.required,
                     resolved_dists_by_key=resolved_dists_by_key,
                 ):
@@ -659,25 +594,25 @@ class PEXEnvironment(object):
                     "Failed to resolve requirements from PEX environment @ {pex}.\n"
                     "Needed {platform} compatible dependencies for:\n"
                     "{items}".format(
-                        pex=self.source_pex,
-                        platform=self._target.platform.tag,
-                        items="\n".join(items),
+                        pex=self._pex, platform=self._target.platform.tag, items="\n".join(items)
                     )
                 )
 
         return OrderedSet(resolved_dists_by_key.values())
 
+    _NAMESPACE_PACKAGE_METADATA_RESOURCE = "namespace_packages.txt"
+
     @classmethod
     def _get_namespace_packages(cls, dist):
-        # type: (Distribution) -> Tuple[Text, ...]
-        return tuple(dist.iter_metadata_lines("namespace_packages.txt"))
+        if dist.has_metadata(cls._NAMESPACE_PACKAGE_METADATA_RESOURCE):
+            return list(dist.get_metadata_lines(cls._NAMESPACE_PACKAGE_METADATA_RESOURCE))
+        else:
+            return []
 
     @classmethod
     def _declare_namespace_packages(cls, resolved_dists):
         # type: (Iterable[Distribution]) -> None
-        namespace_packages_by_dist = (
-            OrderedDict()
-        )  # type: OrderedDict[Distribution, Tuple[Text, ...]]
+        namespace_packages_by_dist = OrderedDict()
         for dist in resolved_dists:
             namespace_packages = cls._get_namespace_packages(dist)
             # NB: Dists can explicitly declare empty namespace packages lists to indicate they have none.

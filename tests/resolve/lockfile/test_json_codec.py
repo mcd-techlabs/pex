@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import json
@@ -10,7 +10,7 @@ from textwrap import dedent
 import pytest
 
 from pex.compatibility import PY2
-from pex.dist_metadata import Constraint, Requirement
+from pex.dist_metadata import Requirement
 from pex.pep_440 import Version
 from pex.pep_503 import ProjectName
 from pex.pip.version import PipVersion
@@ -19,8 +19,8 @@ from pex.resolve.lockfile import json_codec
 from pex.resolve.lockfile.json_codec import ParseError, PathMappingError
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.path_mappings import PathMapping, PathMappings
-from pex.resolve.resolved_requirement import ArtifactURL, Fingerprint, Pin
-from pex.resolve.resolver_configuration import BuildConfiguration, ResolverVersion
+from pex.resolve.resolved_requirement import Fingerprint, Pin
+from pex.resolve.resolver_configuration import ResolverVersion
 from pex.sorted_tuple import SortedTuple
 from pex.third_party.packaging import tags
 from pex.typing import TYPE_CHECKING
@@ -50,9 +50,13 @@ def test_roundtrip(tmpdir):
             Requirement.parse("ansicolors"),
             Requirement.parse("requests>=2; sys_platform == 'darwin'"),
         ),
-        constraints=(Constraint.parse("ansicolors==1.1.8"),),
+        constraints=(Requirement.parse("ansicolors==1.1.8"),),
         allow_prereleases=True,
-        build_configuration=BuildConfiguration(),
+        allow_wheels=False,
+        allow_builds=False,
+        prefer_older_binary=False,
+        use_pep517=None,
+        build_isolation=True,
         transitive=False,
         locked_resolves=[
             LockedResolve(
@@ -596,8 +600,6 @@ def test_path_mappings_round_trip():
         lock_file2 != lock_file
     ), "Expected path roots to be reified to different values than we started with."
     assert (
-        ArtifactURL.parse(
-            "file:///at/another/path/find-links/ansicolors-1.1.8-py2.py3-none-any.whl"
-        )
+        "file:///at/another/path/find-links/ansicolors-1.1.8-py2.py3-none-any.whl"
         == lock_file2.locked_resolves[0].locked_requirements[0].artifact.url
     )

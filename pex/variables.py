@@ -1,4 +1,4 @@
-# Copyright 2015 Pex project contributors.
+# Copyright 2015 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 # Due to the PEX_ properties, disable checkstyle.
@@ -337,9 +337,7 @@ class Variables(object):
     def strip(self):
         # type: () -> Variables
         stripped_environ = {
-            k: v
-            for k, v in self.copy().items()
-            if k.startswith("__PEX_BUILD_") or not k.startswith(("PEX_", "__PEX_"))
+            k: v for k, v in self.copy().items() if not k.startswith(("PEX_", "__PEX_"))
         }
         return Variables(environ=stripped_environ)
 
@@ -530,6 +528,8 @@ class Variables(object):
         IF PEX_INTERPRETER is true, use a command history file for REPL user convenience.
         The location of the history file is determined by PEX_INTERPRETER_HISTORY_FILE.
 
+        Note: Only supported on CPython interpreters.
+
         Default: false.
         """
         return self._get_bool("PEX_INTERPRETER_HISTORY")
@@ -540,7 +540,7 @@ class Variables(object):
         """File.
 
         IF PEX_INTERPRETER_HISTORY is true, use this history file.
-        The default is the standard Python interpreter history location.
+        The default is the standard CPython interpreter history location.
 
         Default: ~/.python_history.
         """
@@ -603,7 +603,7 @@ class Variables(object):
         # type: () -> Optional[Tuple[str, ...]]
         """String.
 
-        A ':' or ';' separated string containing paths of blessed Python interpreters for
+        A {pathsep!r} separated string containing paths of blessed Python interpreters for
         overriding the Python interpreter used to invoke this PEX. Can be absolute paths to
         interpreters or standard $PATH style directory entries that are searched for child files
         that are python binaries.
@@ -617,7 +617,7 @@ class Variables(object):
         # type: () -> Tuple[str, ...]
         """String.
 
-        A ':' or ';' separated string containing paths to add to the runtime sys.path.
+        A {pathsep!r} separated string containing paths to add to the runtime sys.path.
 
         Should be used sparingly, e.g., if you know that code inside this PEX needs to
         interact with code outside it.
@@ -628,7 +628,9 @@ class Variables(object):
         existing sys.path (which you may not have control over) is scrubbed.
 
         See also PEX_PATH for how to merge packages from other pexes into the current environment.
-        """
+        """.format(
+            pathsep=os.pathsep
+        )
         return self._maybe_get_path_tuple("PEX_EXTRA_SYS_PATH") or ()
 
     @defaulted_property(default=os.path.join("~", ".pex"))
@@ -742,37 +744,6 @@ class Variables(object):
         """
         return self._get_bool("PEX_TOOLS")
 
-    @defaulted_property(default=1)
-    def PEX_MAX_INSTALL_JOBS(self):
-        # type: () -> int
-        """Integer.
-
-        The maximum number of parallel jobs to use when installing third party dependencies
-        contained in a PEX during its first boot. Values are interpreted as follows:
-
-        * ``>=2`` Dependencies should be installed in parallel using exactly this maximum number of
-          jobs.
-        * ``1`` Dependencies should be installed in serial.
-        * ``0`` The maximum number of parallel jobs should be auto-selected taking the number of
-          cores into account.
-        * ``-1`` The maximum number of parallel jobs should be auto-selected taking both the
-          characteristics of the third party dependencies contained in the PEX and the number of
-          cores into account. The third party dependency heuristics are intended to yield good
-          install performance, but are opaque and may change across PEX releases if better
-          heuristics are discovered.
-        * ``<=-2`` These are illegal values; an error is raised.
-
-        Default: 1
-        """
-        install_jobs = self._get_int("PEX_MAX_INSTALL_JOBS")
-        if install_jobs < -1:
-            raise ValueError(
-                "PEX_MAX_INSTALL_JOBS must be -1 or greater; given: {jobs}".format(
-                    jobs=install_jobs
-                )
-            )
-        return install_jobs
-
     def __repr__(self):
         return "{}({!r})".format(type(self).__name__, self._environ)
 
@@ -782,7 +753,7 @@ ENV = Variables()
 
 
 # TODO(John Sirois): Extract a runtime.modes package to hold code dealing with runtime mode
-#  calculations: https://github.com/pex-tool/pex/issues/1154
+#  calculations: https://github.com/pantsbuild/pex/issues/1154
 def _expand_pex_root(pex_root):
     # type: (str) -> str
     fallback = os.path.expanduser(pex_root)

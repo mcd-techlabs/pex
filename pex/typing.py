@@ -1,4 +1,4 @@
-# Copyright 2020 Pex project contributors.
+# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 """Constants to enable safe imports from the `typing` module.
@@ -37,6 +37,7 @@ TYPE_CHECKING = False
 # Unlike most type-hints, `cast` and `overload` get used at runtime. We define no-op versions for
 # runtime use.
 if TYPE_CHECKING:
+    from typing import Any
     from typing import Generic as Generic
     from typing import cast as cast
     from typing import overload as overload

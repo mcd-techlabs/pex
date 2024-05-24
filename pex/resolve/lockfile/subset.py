@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -10,10 +10,9 @@ from pex.common import pluralize
 from pex.network_configuration import NetworkConfiguration
 from pex.orderedset import OrderedSet
 from pex.requirements import LocalProjectRequirement, parse_requirement_strings
-from pex.resolve.locked_resolve import Resolved
+from pex.resolve.locked_resolve import DownloadableArtifact, Resolved
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.requirement_configuration import RequirementConfiguration
-from pex.resolve.resolver_configuration import BuildConfiguration
 from pex.result import Error
 from pex.targets import Target, Targets
 from pex.tracer import TRACER
@@ -46,7 +45,9 @@ def subset(
     lock,  # type: Lockfile
     requirement_configuration=RequirementConfiguration(),  # type: RequirementConfiguration
     network_configuration=None,  # type: Optional[NetworkConfiguration]
-    build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+    build=True,  # type: bool
+    use_wheel=True,  # type: bool
+    prefer_older_binary=False,  # type: bool
     transitive=True,  # type: bool
     include_all_matches=False,  # type: bool
 ):
@@ -86,12 +87,14 @@ def subset(
                     requirements_to_resolve,
                     constraints=constraints,
                     source=lock.source,
-                    build_configuration=build_configuration,
+                    build=build,
+                    use_wheel=use_wheel,
+                    prefer_older_binary=prefer_older_binary,
                     transitive=transitive,
                     include_all_matches=include_all_matches,
                     # TODO(John Sirois): Plumb `--ignore-errors` to support desired but technically
                     #  invalid `pip-legacy-resolver` locks:
-                    #  https://github.com/pex-tool/pex/issues/1652
+                    #  https://github.com/pantsbuild/pex/issues/1652
                 )
                 if isinstance(resolve_result, Resolved):
                     resolveds.append(resolve_result)

@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 
-import atexit
 import hashlib
 import io
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-from email.parser import Parser
 from enum import Enum, unique
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path, PurePath
-from typing import Dict, Iterator, Optional, Tuple, cast
+from typing import Optional, Tuple, cast
 
+PROJECT_METADATA = Path("pyproject.toml")
 DIST_DIR = Path("dist")
 
 
-def build_pex_pex(
-    output_file: PurePath, verbosity: int = 0, env: Optional[Dict[str, str]] = None
-) -> PurePath:
+def python_requires() -> str:
+    # N.B.: We run this script directly from integration tests where toml is not needed; so we lazy
+    # import to allow for this direct running of the script without dependency installation by tox
+    # in ITs.
+    import toml
+
+    project_metadata = toml.loads(PROJECT_METADATA.read_text())
+    return cast(str, project_metadata["tool"]["flit"]["metadata"]["requires-python"].strip())
+
+
+def build_pex_pex(output_file: PurePath, verbosity: int = 0) -> None:
     # NB: We do not include the subprocess extra (which would be spelled: `.[subprocess]`) since we
     # would then produce a pex that would not be consumable by all python interpreters otherwise
     # meeting `python_requires`; ie: we'd need to then come up with a deploy environment / deploy
@@ -49,16 +54,10 @@ def build_pex_pex(
         "pex",
         pex_requirement,
     ]
-    subprocess.run(args=args, env=env, check=True)
-    return output_file
+    subprocess.run(args, check=True)
 
 
-def describe_rev() -> str:
-    if not os.path.isdir(".git") and os.path.isfile("PKG-INFO"):
-        # We're being build from an unpacked sdist.
-        with open("PKG-INFO") as fp:
-            return Parser().parse(fp).get("Version", "Unknown Version")
-
+def describe_git_rev() -> str:
     git_describe = subprocess.run(
         ["git", "describe"], check=True, stdout=subprocess.PIPE, encoding="utf-8"
     )
@@ -84,63 +83,30 @@ class Format(Enum):
     def __str__(self) -> str:
         return cast(str, self.value)
 
-    def build_arg(self) -> str:
-        return f"--{self.value}"
 
-
-def build_pex_dists(
-    dist_fmt: Format,
-    *additional_dist_fmts: Format,
-    verbose: bool = False,
-    env: Optional[Dict[str, str]] = None
-) -> Iterator[PurePath]:
-    tmp_dir = DIST_DIR / ".tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
-    out_dir = tempfile.mkdtemp(dir=tmp_dir)
-
+def build_pex_dists(dist_fmt: Format, *additional_dist_fmts: Format, verbose: bool = False) -> None:
     output = None if verbose else subprocess.DEVNULL
-
     subprocess.run(
-        args=[
-            sys.executable,
-            "-m",
-            "build",
-            "--outdir",
-            out_dir,
-            *[fmt.build_arg() for fmt in [dist_fmt, *additional_dist_fmts]],
-        ],
-        env=env,
+        ["flit", "build", *[f"--format={fmt}" for fmt in [dist_fmt, *additional_dist_fmts]]],
         stdout=output,
         stderr=output,
         check=True,
     )
 
-    for dist in os.listdir(out_dir):
-        built = DIST_DIR / dist
-        shutil.move(os.path.join(out_dir, dist), built)
-        yield built
-
 
 def main(
     *additional_dist_formats: Format,
     verbosity: int = 0,
-    embed_docs: bool = False,
-    clean_docs: bool = False,
     pex_output_file: Optional[Path] = DIST_DIR / "pex",
     serve: bool = False
 ) -> None:
-    env = os.environ.copy()
-    if embed_docs:
-        env.update(__PEX_BUILD_INCLUDE_DOCS__="1")
-
     if pex_output_file:
         print(f"Building Pex PEX to `{pex_output_file}` ...")
-        build_pex_pex(pex_output_file, verbosity, env=env)
+        build_pex_pex(pex_output_file, verbosity)
 
-        rev = describe_rev()
+        git_rev = describe_git_rev()
         sha256, size = describe_file(pex_output_file)
-        print(f"Built Pex PEX @ {rev}:")
+        print(f"Built Pex PEX @ {git_rev}:")
         print(f"sha256: {sha256}")
         print(f"  size: {size}")
 
@@ -149,20 +115,14 @@ def main(
             f"Building additional distribution formats to `{DIST_DIR}`: "
             f'{", ".join(f"{i + 1}.) {fmt}" for i, fmt in enumerate(additional_dist_formats))} ...'
         )
-        built = list(
-            build_pex_dists(
-                additional_dist_formats[0],
-                *additional_dist_formats[1:],
-                verbose=verbosity > 0,
-                env=env
-            )
-        )
+        build_pex_dists(*additional_dist_formats, verbose=verbosity > 0)
         print("Built:")
-        for dist_path in built:
-            print(f"  {dist_path}")
-
-    if clean_docs:
-        shutil.rmtree(DIST_DIR / "docs", ignore_errors=True)
+        for root, _, files in os.walk(DIST_DIR):
+            root_path = Path(root)
+            for f in files:
+                dist_path = root_path / f
+                if dist_path != pex_output_file:
+                    print(f"  {dist_path}")
 
     if serve:
         server = HTTPServer(("", 0), SimpleHTTPRequestHandler)
@@ -178,21 +138,13 @@ def main(
 
 
 if __name__ == "__main__":
+    if not PROJECT_METADATA.is_file():
+        print("This script must be run from the root of the Pex repo.", file=sys.stderr)
+        sys.exit(1)
+
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument(
         "-v", dest="verbosity", action="count", default=0, help="Increase output verbosity level."
-    )
-    parser.add_argument(
-        "--embed-docs",
-        default=False,
-        action="store_true",
-        help="Embed offline docs in the built binary distributions.",
-    )
-    parser.add_argument(
-        "--clean-docs",
-        default=False,
-        action="store_true",
-        help="Clean up loose generated docs after they have embedded in binary distributions.",
     )
     parser.add_argument(
         "--additional-format",
@@ -225,8 +177,6 @@ if __name__ == "__main__":
     main(
         *(args.additional_formats or ()),
         verbosity=args.verbosity,
-        embed_docs=args.embed_docs,
-        clean_docs=args.clean_docs,
         pex_output_file=None if args.no_pex else args.pex_output_file,
         serve=args.serve
     )

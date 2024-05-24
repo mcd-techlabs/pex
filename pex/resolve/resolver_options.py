@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -8,17 +8,14 @@ from argparse import Action, ArgumentTypeError, Namespace, _ActionsContainer
 
 from pex import pex_warnings
 from pex.argparse import HandleBoolAction
-from pex.fetcher import initialize_ssl_context
 from pex.network_configuration import NetworkConfiguration
 from pex.orderedset import OrderedSet
-from pex.pep_503 import ProjectName
 from pex.pip.version import PipVersion, PipVersionValue
 from pex.resolve.lockfile import json_codec
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.path_mappings import PathMapping, PathMappings
 from pex.resolve.resolver_configuration import (
     PYPI,
-    BuildConfiguration,
     LockRepositoryConfiguration,
     PexRepositoryConfiguration,
     PipConfiguration,
@@ -181,42 +178,17 @@ def register(
         "--no-binary",
         "--no-use-binary",
         dest="allow_wheels",
-        default=default_resolver_configuration.build_configuration.allow_wheels,
+        default=default_resolver_configuration.allow_wheels,
         action=HandleBoolAction,
         help="Whether to allow binary distributions.",
-    )
-
-    def valid_project_name(arg):
-        # type: (str) -> ProjectName
-        try:
-            return ProjectName(arg, validated=True)
-        except ProjectName.InvalidError as e:
-            raise ArgumentTypeError(str(e))
-
-    parser.add_argument(
-        "--only-binary",
-        "--only-wheel",
-        dest="only_wheels",
-        default=[],
-        action="append",
-        help="Names of projects to only ever accept pre-built wheels for.",
-        type=valid_project_name,
     )
     parser.add_argument(
         "--build",
         "--no-build",
         dest="allow_builds",
-        default=default_resolver_configuration.build_configuration.allow_builds,
+        default=default_resolver_configuration.allow_builds,
         action=HandleBoolAction,
         help="Whether to allow building of distributions from source.",
-    )
-    parser.add_argument(
-        "--only-build",
-        dest="only_builds",
-        default=[],
-        action="append",
-        help="Names of projects to only ever build from source.",
-        type=valid_project_name,
     )
     parser.add_argument(
         "--prefer-wheel",
@@ -224,7 +196,7 @@ def register(
         "--no-prefer-wheel",
         "--no-prefer-binary",
         dest="prefer_older_binary",
-        default=default_resolver_configuration.build_configuration.prefer_older_binary,
+        default=default_resolver_configuration.prefer_older_binary,
         action=HandleBoolAction,
         help=(
             "Whether to prefer older binary distributions to newer source distributions (prefer "
@@ -236,11 +208,11 @@ def register(
         "--use-pep517",
         "--no-use-pep517",
         dest="use_pep517",
-        default=default_resolver_configuration.build_configuration.use_pep517,
+        default=default_resolver_configuration.use_pep517,
         action=HandleBoolAction,
         help=(
             "Whether to force use of PEP 517 for building source distributions into wheels ("
-            "https://www.python.org/dev/peps/pep-0517) or force direct invocation of"
+            "https://www.python.org/dev/peps/pep-0518) or force direct invocation of"
             "`setup.py bdist_wheel` (which requires all source distributions have a `setup.py` "
             "based build). Defaults to using PEP-517 only when a `pyproject.toml` file is present "
             "with a `build-system` section. If PEP-517 is forced (--use-pep517 is passed) and no "
@@ -254,7 +226,7 @@ def register(
         "--build-isolation",
         "--no-build-isolation",
         dest="build_isolation",
-        default=default_resolver_configuration.build_configuration.build_isolation,
+        default=default_resolver_configuration.build_isolation,
         action=HandleBoolAction,
         help=(
             "Disable `sys.path` isolation when building a modern source distribution. Build "
@@ -309,7 +281,7 @@ def get_use_pip_config_value(options):
     if options.use_pip_config is not None:
         return cast(bool, options.use_pip_config)
     # An affordance for tests to point at the devpi server.
-    # TODO(John Sirois): https://github.com/pex-tool/pex/issues/2242
+    # TODO(John Sirois): https://github.com/pantsbuild/pex/issues/2242
     #  Improve options system to accept command line args or env vars in general which will promote
     #  PEX_USE_PIP_CONFIG (no leading underscore) to a 1st class Pex CLI control knob.
     return os.environ.get("_PEX_USE_PIP_CONFIG", "False").lower() in ("1", "true")
@@ -521,21 +493,15 @@ def create_pip_configuration(options):
             )
         )
 
-    build_configuration = BuildConfiguration.create(
-        allow_wheels=options.allow_wheels,
-        only_wheels=options.only_wheels,
-        allow_builds=options.allow_builds,
-        only_builds=options.only_builds,
-        prefer_older_binary=options.prefer_older_binary,
-        use_pep517=options.use_pep517,
-        build_isolation=options.build_isolation,
-    )
-
     return PipConfiguration(
         repos_configuration=repos_configuration,
         network_configuration=create_network_configuration(options),
         allow_prereleases=options.allow_prereleases,
-        build_configuration=build_configuration,
+        allow_wheels=options.allow_wheels,
+        allow_builds=options.allow_builds,
+        prefer_older_binary=options.prefer_older_binary,
+        use_pep517=options.use_pep517,
+        build_isolation=options.build_isolation,
         transitive=options.transitive,
         max_jobs=get_max_jobs_value(options),
         preserve_log=options.preserve_pip_download_log,
@@ -565,15 +531,13 @@ def create_network_configuration(options):
 
     :param options: The Pip resolver configuration options.
     """
-    network_configuration = NetworkConfiguration(
+    return NetworkConfiguration(
         retries=options.retries,
         timeout=options.timeout,
         proxy=options.proxy,
         cert=options.cert,
         client_cert=options.client_cert,
     )
-    initialize_ssl_context(network_configuration=network_configuration)
-    return network_configuration
 
 
 def get_max_jobs_value(options):

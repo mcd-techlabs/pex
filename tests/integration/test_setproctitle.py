@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 import os.path
 import subprocess
@@ -13,11 +13,9 @@ from pex.common import safe_open
 from pex.compatibility import commonpath
 from pex.interpreter import PythonInterpreter
 from pex.layout import Layout
-from pex.pep_427 import InstallableType
 from pex.pex_info import PexInfo
 from pex.typing import TYPE_CHECKING
 from testing import IS_MAC, run_pex_command
-from testing.pep_427 import get_installable_type_flag
 
 if TYPE_CHECKING:
     from typing import Any, Text, Tuple
@@ -27,18 +25,10 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     "layout", [pytest.param(layout, id=layout.value) for layout in Layout.values()]
 )
-@pytest.mark.parametrize(
-    "installable_type",
-    [
-        pytest.param(installable_type, id=installable_type.value)
-        for installable_type in InstallableType.values()
-    ],
-)
 def test_setproctitle(
     tmpdir,  # type: Any
     venv,  # type: bool
     layout,  # type: Layout.Value
-    installable_type,  # type: InstallableType.Value
 ):
     # type: (...) -> None
 
@@ -69,15 +59,7 @@ def test_setproctitle(
             )
         )
 
-    build_pex_args = [
-        "-D",
-        src,
-        "-m",
-        "app",
-        "--layout",
-        layout.value,
-        get_installable_type_flag(installable_type),
-    ]
+    build_pex_args = ["-D", src, "-m", "app", "--layout", layout.value]
     if venv:
         build_pex_args.append("--venv")
 

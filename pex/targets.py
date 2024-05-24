@@ -1,4 +1,4 @@
-# Copyright 2019 Pex project contributors.
+# Copyright 2019 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -377,16 +377,3 @@ class Targets(object):
             return cast(Target, next(iter(resolved_targets)))
         except StopIteration:
             return None
-
-    def compatible_shebang(self):
-        # type: () -> Optional[str]
-        pythons = {
-            (target.platform.impl, target.platform.version_info[:2])
-            for target in self.unique_targets()
-        }
-        if len(pythons) == 1:
-            impl, version = pythons.pop()
-            return "#!/usr/bin/env {python}{version}".format(
-                python="pypy" if impl == "pp" else "python", version=".".join(map(str, version))
-            )
-        return None

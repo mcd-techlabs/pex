@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -13,7 +13,7 @@ from hashlib import sha1
 from site import makepath  # type: ignore[attr-defined]
 
 from pex import hashing
-from pex.common import is_pyc_dir, is_pyc_file, safe_mkdir, safe_mkdtemp
+from pex.common import filter_pyc_dirs, filter_pyc_files, safe_mkdir, safe_mkdtemp
 from pex.compatibility import (  # type: ignore[attr-defined]  # `exec_function` is defined dynamically
     PY2,
     exec_function,
@@ -22,7 +22,7 @@ from pex.orderedset import OrderedSet
 from pex.typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import IO, Any, Callable, Iterator, Optional, Text
+    from typing import IO, Any, Callable, Iterator, Optional
 
     from pex.hashing import Hasher
 
@@ -72,7 +72,7 @@ class DistributionHelper(object):
 class CacheHelper(object):
     @classmethod
     def hash(cls, path, digest=None, hasher=sha1):
-        # type: (Text, Optional[Hasher], Callable[[], Hasher]) -> str
+        # type: (str, Optional[Hasher], Callable[[], Hasher]) -> str
         """Return the digest of a single file in a memory-efficient manner."""
         if digest is None:
             digest = hasher()
@@ -87,9 +87,8 @@ class CacheHelper(object):
         hashing.dir_hash(
             directory=directory,
             digest=digest,
-            dir_filter=lambda d: not is_pyc_dir(d),
-            file_filter=lambda file_path: not is_pyc_file(file_path)
-            and not file_path.startswith("."),
+            dir_filter=filter_pyc_dirs,
+            file_filter=lambda files: (f for f in filter_pyc_files(files) if not f.startswith(".")),
         )
         return digest.hexdigest()
 
@@ -102,8 +101,8 @@ class CacheHelper(object):
         hashing.dir_hash(
             directory=directory,
             digest=digest,
-            dir_filter=lambda d: not is_pyc_dir(d),
-            file_filter=lambda f: not is_pyc_file(f),
+            dir_filter=filter_pyc_dirs,
+            file_filter=filter_pyc_files,
         )
         return digest.hexdigest()
 
@@ -120,8 +119,8 @@ class CacheHelper(object):
             zip_path=zip_path,
             digest=digest,
             relpath=relpath,
-            dir_filter=lambda d: not is_pyc_dir(d),
-            file_filter=lambda f: not is_pyc_file(f),
+            dir_filter=filter_pyc_dirs,
+            file_filter=filter_pyc_files,
         )
         return digest.hexdigest()
 

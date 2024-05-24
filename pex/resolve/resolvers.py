@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -7,7 +7,6 @@ from abc import abstractmethod
 
 from pex.dist_metadata import Distribution, Requirement
 from pex.fingerprinted_distribution import FingerprintedDistribution
-from pex.pep_427 import InstallableType
 from pex.pip.version import PipVersionValue
 from pex.resolve.lockfile.model import Lockfile
 from pex.sorted_tuple import SortedTuple
@@ -45,11 +44,11 @@ def _sorted_requirements(requirements):
 
 
 @attr.s(frozen=True)
-class ResolvedDistribution(object):
-    """A distribution target, and the resolved distribution that satisfies it.
+class InstalledDistribution(object):
+    """A distribution target, and the installed distribution that satisfies it.
 
-    If the resolved distribution directly satisfies a user-specified requirement, that requirement
-    is included.
+    If installed distribution directly satisfies a user-specified requirement, that requirement is
+    included.
     """
 
     target = attr.ib()  # type: Target
@@ -69,11 +68,11 @@ class ResolvedDistribution(object):
         return self.fingerprinted_distribution.fingerprint
 
     def with_direct_requirements(self, direct_requirements=None):
-        # type: (Optional[Iterable[Requirement]]) -> ResolvedDistribution
+        # type: (Optional[Iterable[Requirement]]) -> InstalledDistribution
         direct_requirements = _sorted_requirements(direct_requirements)
         if direct_requirements == self.direct_requirements:
             return self
-        return ResolvedDistribution(
+        return InstalledDistribution(
             self.target,
             self.fingerprinted_distribution,
             direct_requirements=direct_requirements,
@@ -81,9 +80,8 @@ class ResolvedDistribution(object):
 
 
 @attr.s(frozen=True)
-class ResolveResult(object):
-    distributions = attr.ib()  # type: Tuple[ResolvedDistribution, ...]
-    type = attr.ib()  # type: InstallableType.Value
+class Installed(object):
+    installed_distributions = attr.ib()  # type: Tuple[InstalledDistribution, ...]
 
 
 class Resolver(object):
@@ -98,9 +96,8 @@ class Resolver(object):
         lock,  # type: Lockfile
         targets=Targets(),  # type: Targets
         pip_version=None,  # type: Optional[PipVersionValue]
-        result_type=InstallableType.INSTALLED_WHEEL_CHROOT,  # type: InstallableType.Value
     ):
-        # type: (...) -> ResolveResult
+        # type: (...) -> Installed
         raise NotImplementedError()
 
     def resolve_requirements(
@@ -108,7 +105,6 @@ class Resolver(object):
         requirements,  # type: Iterable[str]
         targets=Targets(),  # type: Targets
         pip_version=None,  # type: Optional[PipVersionValue]
-        result_type=InstallableType.INSTALLED_WHEEL_CHROOT,  # type: InstallableType.Value
     ):
-        # type: (...) -> ResolveResult
+        # type: (...) -> Installed
         raise NotImplementedError()

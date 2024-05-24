@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, print_function
@@ -20,13 +20,12 @@ from collections import defaultdict, namedtuple
 from datetime import datetime
 from uuid import uuid4
 
-from pex.typing import TYPE_CHECKING
+from pex.typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from typing import (
         Any,
         Callable,
-        Container,
         DefaultDict,
         Dict,
         Iterable,
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
         Optional,
         Set,
         Sized,
-        Text,
         Tuple,
         Union,
     )
@@ -51,22 +49,26 @@ _UNIX_EPOCH = datetime(year=1970, month=1, day=1, hour=0, minute=0, second=0, tz
 DETERMINISTIC_DATETIME_TIMESTAMP = (DETERMINISTIC_DATETIME - _UNIX_EPOCH).total_seconds()
 
 
-def is_pyc_dir(dir_path):
-    # type: (Text) -> bool
-    """Return `True` if `dir_path` is a Python bytecode cache directory."""
-    return os.path.basename(dir_path) == "__pycache__"
+def filter_pyc_dirs(dirs):
+    # type: (Iterable[str]) -> Iterator[str]
+    """Return an iterator over the input `dirs` filtering out Python bytecode cache directories."""
+    for d in dirs:
+        if d != "__pycache__":
+            yield d
 
 
-def is_pyc_file(file_path):
-    # type: (Text) -> bool
-    """Return `True` if `file_path` is a Python bytecode file."""
-    # N.B.: For Python 2.7, `.pyc` files are compiled as siblings to `.py` files (there is no
-    # __pycache__ dir).
-    return file_path.endswith((".pyc", ".pyo")) or is_pyc_temporary_file(file_path)
+def filter_pyc_files(files):
+    # type: (Iterable[str]) -> Iterator[str]
+    """Iterate the input `files` filtering out any Python bytecode files."""
+    for f in files:
+        # For Python 2.7, `.pyc` files are compiled as siblings to `.py` files (there is no
+        # __pycache__ dir).
+        if not f.endswith((".pyc", ".pyo")) and not is_pyc_temporary_file(f):
+            yield f
 
 
 def is_pyc_temporary_file(file_path):
-    # type: (Text) -> bool
+    # type: (str) -> bool
     """Check if `file` is a temporary Python bytecode file."""
     # We rely on the fact that the temporary files created by CPython have object id (integer)
     # suffixes to avoid picking up files where Python bytecode compilation is in-flight; i.e.:
@@ -81,13 +83,13 @@ def die(msg, exit_code=1):
 
 
 def pluralize(
-    subject,  # type: Union[int, Sized]
+    subject,  # type: Sized
     noun,  # type: str
 ):
     # type: (...) -> str
     if noun == "":
         return ""
-    count = subject if isinstance(subject, int) else len(subject)
+    count = len(subject)
     if count == 1:
         return noun
     if noun[-1] in ("s", "x", "z") or noun[-2:] in ("sh", "ch"):
@@ -97,7 +99,7 @@ def pluralize(
 
 
 def safe_copy(source, dest, overwrite=False):
-    # type: (Text, Text, bool) -> None
+    # type: (str, str, bool) -> None
     def do_copy():
         # type: () -> None
         temp_dest = dest + uuid4().hex
@@ -125,7 +127,7 @@ def safe_copy(source, dest, overwrite=False):
                 # `protected_hardlinks` (see: https://www.kernel.org/doc/Documentation/sysctl/fs.txt) and
                 # we can fall back to copying in that case.
                 #
-                # See also https://github.com/pex-tool/pex/issues/850 where this was discovered.
+                # See also https://github.com/pantsbuild/pex/issues/850 where this was discovered.
                 do_copy()
             else:
                 raise
@@ -222,7 +224,6 @@ class PermPreservingZipFile(zipfile.ZipFile, object):
 
 @contextlib.contextmanager
 def open_zip(path, *args, **kwargs):
-    # type: (Text, *Any, **Any) -> Iterator[PermPreservingZipFile]
     """A contextmanager for zip files.
 
     Passes through positional and kwargs to zipfile.ZipFile.
@@ -288,7 +289,7 @@ def register_rmtree(directory):
 
 
 def safe_mkdir(directory, clean=False):
-    # type: (Text, bool) -> Text
+    # type: (str, bool) -> str
     """Safely create a directory.
 
     Ensures a directory is present.  If it's not there, it is created.  If it is, it's a no-op. If
@@ -318,7 +319,7 @@ def safe_open(filename, *args, **kwargs):
 
 
 def safe_delete(filename):
-    # type: (Text) -> None
+    # type: (str) -> None
     """Delete a file safely.
 
     If it's not present, no-op.
@@ -331,7 +332,7 @@ def safe_delete(filename):
 
 
 def safe_rmtree(directory):
-    # type: (Text) -> None
+    # type: (str) -> None
     """Delete a directory if it's present.
 
     If it's not present, no-op.
@@ -358,7 +359,7 @@ def safe_sleep(seconds):
 
 
 def chmod_plus_x(path):
-    # type: (Text) -> None
+    # type: (str) -> None
     """Equivalent of unix `chmod a+x path`"""
     path_mode = os.stat(path).st_mode
     path_mode &= int("777", 8)
@@ -445,7 +446,7 @@ def can_write_dir(path):
 
 
 def touch(file):
-    # type: (Text) -> None
+    # type: (str) -> None
     """Equivalent of unix `touch path`."""
     with safe_open(file, "a"):
         os.utime(file, None)
@@ -461,7 +462,11 @@ class Chroot(object):
         pass
 
     class ChrootTaggingException(Error):
-        pass
+        def __init__(self, filename, orig_tag, new_tag):
+            super(Chroot.ChrootTaggingException, self).__init__(  # noqa: T800
+                "Trying to add %s to fileset(%s) but already in fileset(%s)!"
+                % (filename, new_tag, orig_tag)
+            )
 
     def __init__(self, chroot_base):
         # type: (str) -> None
@@ -475,7 +480,6 @@ class Chroot(object):
             raise self.Error("Unable to create chroot in %s: %s" % (chroot_base, e))
         self.chroot = chroot_base  # type: str
         self.filesets = defaultdict(set)  # type: DefaultDict[Optional[str], Set[str]]
-        self._compress_by_file = {}  # type: Dict[str, bool]
         self._file_index = {}  # type: Dict[str, Optional[str]]
 
     def clone(self, into=None):
@@ -508,51 +512,23 @@ class Chroot(object):
             raise self.Error("Destination path is not a relative path!")
         return dst
 
-    def _check_tag(
-        self,
-        fn,  # type: str
-        label,  # type: Optional[str]
-        compress=True,  # type: bool
-    ):
-        # type: (...) -> None
+    def _check_tag(self, fn, label):
         """Raises ChrootTaggingException if a file was added under more than one label."""
         existing_label = self._file_index.setdefault(fn, label)
         if label != existing_label:
-            raise self.ChrootTaggingException(
-                "Trying to add {file} to fileset({new_tag}) but already in "
-                "fileset({orig_tag})!".format(file=fn, new_tag=label, orig_tag=existing_label)
-            )
-        existing_compress = self._compress_by_file.setdefault(fn, compress)
-        if compress != existing_compress:
-            raise self.ChrootTaggingException(
-                "Trying to add {file} to fileset({tag}) with compress {new_compress} but already "
-                "added with compress {orig_compress}!".format(
-                    file=fn, tag=label, new_compress=compress, orig_compress=existing_compress
-                )
-            )
+            raise self.ChrootTaggingException(fn, existing_label, label)
 
-    def _tag(
-        self,
-        fn,  # type: str
-        label,  # type: Optional[str]
-        compress,  # type: bool
-    ):
-        # type: (...) -> None
-        self._check_tag(fn, label, compress)
+    def _tag(self, fn, label):
+        # type: (str, Optional[str]) -> None
+        self._check_tag(fn, label)
         self.filesets[label].add(fn)
 
     def _ensure_parent(self, path):
         # type: (str) -> None
         safe_mkdir(os.path.dirname(os.path.join(self.chroot, path)))
 
-    def copy(
-        self,
-        src,  # type: str
-        dst,  # type: str
-        label=None,  # type: Optional[str]
-        compress=True,  # type: bool
-    ):
-        # type: (...) -> None
+    def copy(self, src, dst, label=None):
+        # type: (str, str, Optional[str]) -> None
         """Copy file ``src`` to ``chroot/dst`` with optional label.
 
         May raise anything shutil.copy can raise, e.g.
@@ -562,18 +538,12 @@ class Chroot(object):
         but with a different label.
         """
         dst = self._normalize(dst)
-        self._tag(dst, label, compress)
+        self._tag(dst, label)
         self._ensure_parent(dst)
         shutil.copy(src, os.path.join(self.chroot, dst))
 
-    def link(
-        self,
-        src,  # type: str
-        dst,  # type: str
-        label=None,  # type: Optional[str]
-        compress=True,  # type: bool
-    ):
-        # type: (...) -> None
+    def link(self, src, dst, label=None):
+        # type: (str, str, Optional[str]) -> None
         """Hard link file from ``src`` to ``chroot/dst`` with optional label.
 
         May raise anything os.link can raise, e.g.
@@ -583,7 +553,7 @@ class Chroot(object):
         but with a different label.
         """
         dst = self._normalize(dst)
-        self._tag(dst, label, compress)
+        self._tag(dst, label)
         self._ensure_parent(dst)
         abs_src = src
         abs_dst = os.path.join(self.chroot, dst)
@@ -595,11 +565,10 @@ class Chroot(object):
         src,  # type: str
         dst,  # type: str
         label=None,  # type: Optional[str]
-        compress=True,  # type: bool
     ):
         # type: (...) -> None
         dst = self._normalize(dst)
-        self._tag(dst, label, compress)
+        self._tag(dst, label)
         self._ensure_parent(dst)
         abs_src = os.path.abspath(src)
         abs_dst = os.path.join(self.chroot, dst)
@@ -612,7 +581,6 @@ class Chroot(object):
         label=None,  # type: Optional[str]
         mode="wb",  # type: str
         executable=False,  # type: bool
-        compress=True,  # type: bool
     ):
         # type: (...) -> None
         """Write data to ``chroot/dst`` with optional label.
@@ -620,25 +588,21 @@ class Chroot(object):
         Has similar exceptional cases as ``Chroot.copy``
         """
         dst = self._normalize(dst)
-        self._tag(dst, label, compress)
+        self._tag(dst, label)
         self._ensure_parent(dst)
         with open(os.path.join(self.chroot, dst), mode) as wp:
             wp.write(data)
         if executable:
             chmod_plus_x(wp.name)
 
-    def touch(
-        self,
-        dst,  # type: str
-        label=None,  # type: Optional[str]
-    ):
-        # type: (...) -> None
+    def touch(self, dst, label=None):
+        # type: (str, Optional[str]) -> None
         """Perform 'touch' on ``chroot/dst`` with optional label.
 
         Has similar exceptional cases as Chroot.copy
         """
         dst = self._normalize(dst)
-        self._tag(dst, label, compress=False)
+        self._tag(dst, label)
         touch(os.path.join(self.chroot, dst))
 
     def get(self, label):
@@ -688,9 +652,8 @@ class Chroot(object):
         else:
             selected_files = self.files()
 
-        with open_zip(
-            filename, mode, zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
-        ) as zf:
+        compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+        with open_zip(filename, mode, compression) as zf:
 
             def write_entry(
                 filename,  # type: str
@@ -704,8 +667,6 @@ class Chroot(object):
                     if deterministic_timestamp
                     else None,
                 )
-                compress_file = compress and self._compress_by_file.get(arcname, True)
-                compression = zipfile.ZIP_DEFLATED if compress_file else zipfile.ZIP_STORED
                 zf.writestr(zip_entry.info, zip_entry.data, compression)
 
             def get_parent_dir(path):
@@ -750,79 +711,3 @@ class Chroot(object):
             for filename, arcname in iter_files():
                 maybe_write_parent_dirs(arcname)
                 write_entry(filename, arcname)
-
-
-def relative_symlink(
-    src,  # type: Text
-    dst,  # type: Text
-):
-    # type: (...) -> None
-    """Creates a symlink to `src` at `dst` using the relative path to `src` from `dst`.
-
-    :param src: The target of the symlink.
-    :param dst: The path to create the symlink at.
-    """
-    dst_parent = os.path.dirname(dst)
-    rel_src = os.path.relpath(src, dst_parent)
-    os.symlink(rel_src, dst)
-
-
-def iter_copytree(
-    src,  # type: Text
-    dst,  # type: Text
-    exclude=(),  # type: Container[Text]
-    symlink=False,  # type: bool
-):
-    # type: (...) -> Iterator[Tuple[Text, Text]]
-    """Copies the directory tree rooted at `src` to `dst` yielding a tuple for each copied file.
-
-    When not using symlinks, if hard links are appropriate they will be used; otherwise files are
-    copied.
-
-    N.B.: The returned iterator must be consumed to drive the copying operations to completion.
-
-    :param src: The source directory tree to copy.
-    :param dst: The destination location to copy the source tree to.
-    :param exclude: Names (basenames) of files and directories to exclude from copying.
-    :param symlink: Whether to use symlinks instead of copies (or hard links).
-    :return: An iterator over tuples identifying the copied files of the form `(src, dst)`.
-    """
-    safe_mkdir(dst)
-    link = True
-    for root, dirs, files in os.walk(src, topdown=True, followlinks=True):
-        if src == root:
-            dirs[:] = [d for d in dirs if d not in exclude]
-            files[:] = [f for f in files if f not in exclude]
-
-        for path, is_dir in itertools.chain(
-            zip(dirs, itertools.repeat(True)), zip(files, itertools.repeat(False))
-        ):
-            src_entry = os.path.join(root, path)
-            dst_entry = os.path.join(dst, os.path.relpath(src_entry, src))
-            if not is_dir:
-                yield src_entry, dst_entry
-            try:
-                if symlink:
-                    relative_symlink(src_entry, dst_entry)
-                elif is_dir:
-                    os.mkdir(dst_entry)
-                else:
-                    # We only try to link regular files since linking a symlink on Linux can produce
-                    # another symlink, which leaves open the possibility the src_entry target could
-                    # later go missing leaving the dst_entry dangling.
-                    if link and not os.path.islink(src_entry):
-                        try:
-                            os.link(src_entry, dst_entry)
-                            continue
-                        except OSError as e:
-                            if e.errno != errno.EXDEV:
-                                raise e
-                            link = False
-                    shutil.copy(src_entry, dst_entry)
-            except OSError as e:
-                if e.errno != errno.EEXIST:
-                    raise e
-
-        if symlink:
-            # Once we've symlinked the top-level directories and files, we've "copied" everything.
-            return

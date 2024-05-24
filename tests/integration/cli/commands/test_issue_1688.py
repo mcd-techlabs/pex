@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -54,7 +54,7 @@ def test_multiplatform_sdist(
     assert 0 == len(
         locked_requirement.additional_artifacts
     ), "Expected just a single sdist artifact since we specified --no-wheel."
-    assert locked_requirement.artifact.url.path.endswith(".tar.gz"), "Expected a locked sdist URL."
+    assert locked_requirement.artifact.url.endswith(".tar.gz"), "Expected a locked sdist URL."
 
     pex = os.path.join(str(tmpdir), "pex")
     run_pex_command(args=["--lock", lock, "-o", pex] + interpreter_selection_args).assert_success()

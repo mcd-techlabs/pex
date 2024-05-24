@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -19,7 +19,6 @@ from pex.pip.tool import PackageIndexConfiguration, Pip
 from pex.pip.version import PipVersion, PipVersionValue
 from pex.platforms import Platform
 from pex.resolve.configured_resolver import ConfiguredResolver
-from pex.resolve.resolver_configuration import ResolverVersion
 from pex.targets import AbbreviatedPlatform, LocalInterpreter, Target
 from pex.typing import TYPE_CHECKING
 from pex.variables import ENV
@@ -106,20 +105,6 @@ def test_no_duplicate_constraints_pex_warnings(
     )
 
 
-def package_index_configuration(
-    pip_version,  # type: PipVersionValue
-    use_pip_config=False,  # type: bool
-):
-    # type: (...) -> PackageIndexConfiguration
-    if pip_version is PipVersion.v23_2:
-        # N.B.: Pip 23.2 has a bug handling PEP-658 metadata with the legacy resolver; so we use the
-        # 2020 resolver to work around. See: https://github.com/pypa/pip/issues/12156
-        return PackageIndexConfiguration.create(
-            pip_version, resolver_version=ResolverVersion.PIP_2020, use_pip_config=use_pip_config
-        )
-    return PackageIndexConfiguration.create(use_pip_config=use_pip_config)
-
-
 @pytest.mark.skipif(
     not IS_LINUX
     or not any(
@@ -141,15 +126,18 @@ def test_download_platform_issues_1355(
     pip = create_pip(py38, version=version)
     download_dir = os.path.join(str(tmpdir), "downloads")
 
-    def download_pyarrow(target=None):
-        # type: (Optional[Target]) -> Job
+    def download_pyarrow(
+        target=None,  # type: Optional[Target]
+        package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
+    ):
+        # type: (...) -> Job
         safe_rmtree(download_dir)
         return pip.spawn_download_distributions(
             download_dir=download_dir,
             requirements=["pyarrow==4.0.1"],
             transitive=False,
             target=target,
-            package_index_configuration=package_index_configuration(pip.version),
+            package_index_configuration=package_index_configuration,
         )
 
     def assert_pyarrow_downloaded(
@@ -187,7 +175,6 @@ def assert_download_platform_markers_issue_1366(
         requirements=["typing_extensions==3.7.4.2; python_version < '3.8'"],
         download_dir=download_dir,
         transitive=False,
-        package_index_configuration=package_index_configuration(pip.version),
     ).wait()
 
     assert ["typing_extensions-3.7.4.2-py2-none-any.whl"] == os.listdir(download_dir)
@@ -212,7 +199,7 @@ def test_download_platform_markers_issue_1366_issue_1387(
 ):
     # type: (...) -> None
 
-    # As noted in https://github.com/pex-tool/pex/issues/1387, previously, internal env vars were
+    # As noted in https://github.com/pantsbuild/pex/issues/1387, previously, internal env vars were
     # passed by 1st cloning the ambient environment and then adding internal env vars for
     # subprocesses to see. This could lead to duplicate keyword argument errors when env vars we
     # patch - like PEX_ROOT - are also present in the ambient environment. This test verifies we
@@ -269,7 +256,6 @@ def test_download_platform_markers_issue_1488(
         constraint_files=[constraints_file],
         download_dir=download_dir,
         transitive=True,
-        package_index_configuration=package_index_configuration(version),
     ).wait()
 
     assert (
@@ -296,9 +282,7 @@ def test_create_confounding_env_vars_issue_1668(
 
     download_dir = os.path.join(str(tmpdir), "downloads")
     create_pip(None, version=version, PEX_SCRIPT="pex3").spawn_download_distributions(
-        requirements=["ansicolors==1.1.8"],
-        download_dir=download_dir,
-        package_index_configuration=package_index_configuration(pip_version=version),
+        requirements=["ansicolors==1.1.8"], download_dir=download_dir
     ).wait()
     assert ["ansicolors-1.1.8-py2.py3-none-any.whl"] == os.listdir(download_dir)
 
@@ -358,23 +342,20 @@ def test_use_pip_config(
     with ENV.patch(PIP_PYTHON_VERSION="invalid") as env, environment_as(**env):
         assert "invalid" == os.environ["PIP_PYTHON_VERSION"]
         job = pip.spawn_download_distributions(
-            download_dir=download_dir,
-            requirements=["ansicolors==1.1.8"],
-            package_index_configuration=package_index_configuration(pip_version=version),
+            download_dir=download_dir, requirements=["ansicolors==1.1.8"]
         )
         assert "--isolated" in job._command
         job.wait()
         assert ["ansicolors-1.1.8-py2.py3-none-any.whl"] == os.listdir(download_dir)
 
         shutil.rmtree(download_dir)
+        package_index_configuration = PackageIndexConfiguration.create(use_pip_config=True)
         job = pip.spawn_download_distributions(
             download_dir=download_dir,
             requirements=["ansicolors==1.1.8"],
-            package_index_configuration=package_index_configuration(
-                pip_version=version, use_pip_config=True
-            ),
+            package_index_configuration=package_index_configuration,
         )
-        assert "--isolated" not in job._command, "\n".join(job._command)
+        assert "--isolated" not in job._command
         with pytest.raises(Job.Error) as exc:
             job.wait()
         assert not os.path.exists(download_dir)

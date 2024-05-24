@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -20,26 +20,24 @@ from pex.common import safe_mkdir, safe_mkdtemp
 from pex.compatibility import url_unquote, urlparse
 from pex.dist_metadata import DistMetadata, Distribution, ProjectNameAndVersion, Requirement
 from pex.fingerprinted_distribution import FingerprintedDistribution
-from pex.jobs import Raise, SpawnedJob, execute_parallel, iter_map_parallel
+from pex.jobs import Raise, SpawnedJob, execute_parallel
 from pex.network_configuration import NetworkConfiguration
 from pex.orderedset import OrderedSet
-from pex.pep_376 import InstalledWheel
 from pex.pep_425 import CompatibilityTags
-from pex.pep_427 import InstallableType, WheelError, install_wheel_chroot
 from pex.pep_503 import ProjectName
 from pex.pex_info import PexInfo
 from pex.pip.download_observer import DownloadObserver
 from pex.pip.installation import get_pip
 from pex.pip.tool import PackageIndexConfiguration
-from pex.pip.version import PipVersionValue
+from pex.pip.version import PipVersion, PipVersionValue
 from pex.requirements import LocalProjectRequirement
 from pex.resolve.downloads import get_downloads_dir
 from pex.resolve.requirement_configuration import RequirementConfiguration
-from pex.resolve.resolver_configuration import BuildConfiguration, ResolverVersion
+from pex.resolve.resolver_configuration import ResolverVersion
 from pex.resolve.resolvers import (
-    ResolvedDistribution,
+    Installed,
+    InstalledDistribution,
     Resolver,
-    ResolveResult,
     Unsatisfiable,
     Untranslatable,
 )
@@ -84,7 +82,11 @@ class DownloadRequest(object):
     allow_prereleases = attr.ib(default=False)  # type: bool
     transitive = attr.ib(default=True)  # type: bool
     package_index_configuration = attr.ib(default=None)  # type: Optional[PackageIndexConfiguration]
-    build_configuration = attr.ib(default=BuildConfiguration())  # type: BuildConfiguration
+    build = attr.ib(default=True)  # type: bool
+    use_wheel = attr.ib(default=True)  # type: bool
+    prefer_older_binary = attr.ib(default=False)  # type: bool
+    use_pep517 = attr.ib(default=None)  # type: Optional[bool]
+    build_isolation = attr.ib(default=True)  # type: bool
     observer = attr.ib(default=None)  # type: Optional[ResolveObserver]
     preserve_log = attr.ib(default=False)  # type: bool
     pip_version = attr.ib(default=None)  # type: Optional[PipVersionValue]
@@ -144,7 +146,11 @@ class DownloadRequest(object):
             transitive=self.transitive,
             target=target,
             package_index_configuration=self.package_index_configuration,
-            build_configuration=self.build_configuration,
+            build=self.build,
+            use_wheel=self.use_wheel,
+            prefer_older_binary=self.prefer_older_binary,
+            use_pep517=self.use_pep517,
+            build_isolation=self.build_isolation,
             observer=observer,
             preserve_log=self.preserve_log,
         )
@@ -199,7 +205,7 @@ def fingerprint_path(path):
     # option than switching hashing algorithms will be needed, like post-fixing a running version
     # integer or just mixing one into the hashed content.
     #
-    # See: https://github.com/pex-tool/pex/issues/1655 for a general overview of these cache
+    # See: https://github.com/pantsbuild/pex/issues/1655 for a general overview of these cache
     # structure concerns.
     hasher = hashlib.sha256
 
@@ -409,10 +415,6 @@ class InstallResult(object):
         # type: () -> bool
         return self._atomic_dir.is_finalized()
 
-    def wheel_file(self):
-        # type: () -> str
-        return self.request.wheel_file
-
     @property
     def build_chroot(self):
         # type: () -> str
@@ -424,7 +426,7 @@ class InstallResult(object):
         return self._atomic_dir.target_dir
 
     def finalize_install(self, install_requests):
-        # type: (Iterable[InstallRequest]) -> Iterator[ResolvedDistribution]
+        # type: (Iterable[InstallRequest]) -> Iterator[InstalledDistribution]
         self._atomic_dir.finalize()
 
         # The install_chroot is keyed by the hash of the wheel file (zip) we installed. Here we add
@@ -478,16 +480,7 @@ class InstallResult(object):
         # pex:   * - paths that do not exist or will be imported via zipimport
         # pex.pex 2.0.2
         #
-        cached_fingerprint = None  # type: Optional[str]
-        try:
-            installed_wheel = InstalledWheel.load(self.install_chroot)
-        except InstalledWheel.LoadError:
-            # We support legacy chroots below by calculating the chroot fingerprint just in time.
-            pass
-        else:
-            cached_fingerprint = installed_wheel.fingerprint
-
-        wheel_dir_hash = cached_fingerprint or fingerprint_path(self.install_chroot)
+        wheel_dir_hash = fingerprint_path(self.install_chroot)
         runtime_key_dir = os.path.join(self._installation_root, wheel_dir_hash)
         with atomic_directory(runtime_key_dir) as atomic_dir:
             if not atomic_dir.is_finalized():
@@ -499,18 +492,18 @@ class InstallResult(object):
                 relative_target_path = os.path.relpath(self.install_chroot, start_dir)
                 os.symlink(relative_target_path, source_path)
 
-        return self._iter_resolved_distributions(install_requests, fingerprint=wheel_dir_hash)
+        return self._iter_installed_distributions(install_requests, fingerprint=wheel_dir_hash)
 
-    def _iter_resolved_distributions(
+    def _iter_installed_distributions(
         self,
         install_requests,  # type: Iterable[InstallRequest]
         fingerprint,  # type: str
     ):
-        # type: (...) -> Iterator[ResolvedDistribution]
+        # type: (...) -> Iterator[InstalledDistribution]
         if self.is_installed:
             distribution = Distribution.load(self.install_chroot)
             for install_request in install_requests:
-                yield ResolvedDistribution(
+                yield InstalledDistribution(
                     target=install_request.target,
                     fingerprinted_distribution=FingerprintedDistribution(distribution, fingerprint),
                 )
@@ -520,14 +513,18 @@ class WheelBuilder(object):
     def __init__(
         self,
         package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
-        build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+        prefer_older_binary=False,  # type: bool
+        use_pep517=None,  # type: Optional[bool]
+        build_isolation=True,  # type: bool
         verify_wheels=True,  # type: bool
         pip_version=None,  # type: Optional[PipVersionValue]
         resolver=None,  # type: Optional[Resolver]
     ):
         # type: (...) -> None
         self._package_index_configuration = package_index_configuration
-        self._build_configuration = build_configuration
+        self._prefer_older_binary = prefer_older_binary
+        self._use_pep517 = use_pep517
+        self._build_isolation = build_isolation
         self._verify_wheels = verify_wheels
         self._pip_version = pip_version
         self._resolver = resolver
@@ -574,7 +571,9 @@ class WheelBuilder(object):
             wheel_dir=build_result.build_dir,
             package_index_configuration=self._package_index_configuration,
             interpreter=build_request.target.get_interpreter(),
-            build_configuration=self._build_configuration,
+            prefer_older_binary=self._prefer_older_binary,
+            use_pep517=self._use_pep517,
+            build_isolation=self._build_isolation,
             verify=self._verify_wheels,
         )
         return SpawnedJob.wait(job=build_job, result=build_result)
@@ -611,102 +610,6 @@ class WheelBuilder(object):
         return build_results
 
 
-@attr.s(frozen=True)
-class DirectRequirements(object):
-    @classmethod
-    def calculate(
-        cls,
-        direct_requirements,  # type: Iterable[ParsedRequirement]
-        install_requests,  # type: Mapping[str, OrderedSet[InstallRequest]]
-        local_project_directory_to_sdist=None,  # type: Optional[Mapping[str, str]]
-    ):
-        # type: (...) -> DirectRequirements
-
-        # 3. All requirements are now in wheel form: calculate any missing direct requirement
-        #    project names from the wheel names.
-        with TRACER.timed(
-            "Calculating project names for direct requirements:"
-            "\n  {}".format("\n  ".join(map(str, direct_requirements)))
-        ):
-
-            def iter_direct_requirements():
-                # type: () -> Iterator[Requirement]
-                for requirement in direct_requirements:
-                    if not isinstance(requirement, LocalProjectRequirement):
-                        yield requirement.requirement
-                        continue
-
-                    install_reqs = install_requests.get(requirement.path)
-                    if not install_reqs and local_project_directory_to_sdist:
-                        local_project_directory = local_project_directory_to_sdist.get(
-                            requirement.path
-                        )
-                        if local_project_directory:
-                            install_reqs = install_requests.get(local_project_directory)
-                    if not install_reqs:
-                        raise AssertionError(
-                            "Failed to compute a project name for {requirement}. No corresponding "
-                            "wheel was found from amongst:\n{install_requests}".format(
-                                requirement=requirement,
-                                install_requests="\n".join(
-                                    sorted(
-                                        "{path} -> {wheel_path} {fingerprint}".format(
-                                            path=path,
-                                            wheel_path=build_result.wheel_path,
-                                            fingerprint=build_result.fingerprint,
-                                        )
-                                        for path, build_results in install_requests.items()
-                                        for build_result in build_results
-                                    )
-                                ),
-                            )
-                        )
-                    for install_req in install_reqs:
-                        yield requirement.as_requirement(dist=install_req.wheel_path)
-
-            direct_requirements_by_project_name = defaultdict(
-                OrderedSet
-            )  # type: DefaultDict[ProjectName, OrderedSet[Requirement]]
-            for direct_requirement in iter_direct_requirements():
-                direct_requirements_by_project_name[direct_requirement.project_name].add(
-                    direct_requirement
-                )
-            return cls(direct_requirements_by_project_name)
-
-    _direct_requirements_by_project_name = (
-        attr.ib()
-    )  # Mapping[ProjectName, OrderedSet[Requirement]]
-
-    def adjust(self, distributions):
-        # type: (Iterable[ResolvedDistribution]) -> Iterable[ResolvedDistribution]
-        resolved_distributions = OrderedSet()  # type: OrderedSet[ResolvedDistribution]
-        for resolved_distribution in distributions:
-            distribution = resolved_distribution.distribution
-            direct_reqs = [
-                req
-                for req in self._direct_requirements_by_project_name[
-                    distribution.metadata.project_name
-                ]
-                if distribution in req and resolved_distribution.target.requirement_applies(req)
-            ]
-            resolved_distributions.add(
-                resolved_distribution.with_direct_requirements(direct_requirements=direct_reqs)
-            )
-        return resolved_distributions
-
-
-def _perform_install(
-    installed_wheels_dir,  # type: str
-    install_request,  # type: InstallRequest
-):
-    # type: (...) -> InstallResult
-    install_result = install_request.result(installed_wheels_dir)
-    install_wheel_chroot(
-        wheel_path=install_request.wheel_path, destination=install_result.build_chroot
-    )
-    return install_result
-
-
 class BuildAndInstallRequest(object):
     def __init__(
         self,
@@ -715,7 +618,9 @@ class BuildAndInstallRequest(object):
         direct_requirements=None,  # type: Optional[Iterable[ParsedRequirement]]
         package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
         compile=False,  # type: bool
-        build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+        prefer_older_binary=False,  # type: bool
+        use_pep517=None,  # type: Optional[bool]
+        build_isolation=True,  # type: bool
         verify_wheels=True,  # type: bool
         pip_version=None,  # type: Optional[PipVersionValue]
         resolver=None,  # type: Optional[Resolver]
@@ -727,7 +632,9 @@ class BuildAndInstallRequest(object):
         self._compile = compile
         self._wheel_builder = WheelBuilder(
             package_index_configuration=package_index_configuration,
-            build_configuration=build_configuration,
+            prefer_older_binary=prefer_older_binary,
+            use_pep517=use_pep517,
+            build_isolation=build_isolation,
             verify_wheels=verify_wheels,
             pip_version=pip_version,
             resolver=resolver,
@@ -762,6 +669,25 @@ class BuildAndInstallRequest(object):
                 )
                 install_results.append(install_result)
         return unsatisfied_install_requests, install_results
+
+    def _spawn_install(
+        self,
+        installed_wheels_dir,  # type: str
+        install_request,  # type: InstallRequest
+    ):
+        # type: (...) -> SpawnedJob[InstallResult]
+        install_result = install_request.result(installed_wheels_dir)
+        install_job = get_pip(
+            interpreter=install_request.target.get_interpreter(),
+            version=self._pip_version,
+            resolver=self._resolver,
+        ).spawn_install_wheel(
+            wheel=install_request.wheel_path,
+            install_dir=install_result.build_chroot,
+            compile=self._compile,
+            target=install_request.target,
+        )
+        return SpawnedJob.wait(job=install_job, result=install_result)
 
     def _resolve_direct_file_deps(
         self,
@@ -811,14 +737,22 @@ class BuildAndInstallRequest(object):
             )
         return all_install_requests
 
-    def _build_distributions(
+    def install_distributions(
         self,
+        ignore_errors=False,  # type: bool
         max_parallel_jobs=None,  # type: Optional[int]
         local_project_directory_to_sdist=None,  # type: Optional[Mapping[str, str]]
     ):
-        # type: (...) -> Tuple[DirectRequirements, Iterable[InstallRequest]]
+        # type: (...) -> Iterable[InstalledDistribution]
+        if not any((self._build_requests, self._install_requests)):
+            # Nothing to build or install.
+            return ()
+
+        installed_wheels_dir = os.path.join(ENV.PEX_ROOT, PexInfo.INSTALL_CACHE)
+        spawn_install = functools.partial(self._spawn_install, installed_wheels_dir)
 
         to_install = list(self._install_requests)
+        installations = []  # type: List[InstalledDistribution]
 
         # 1. Build local projects and sdists.
         build_results = self._wheel_builder.build_wheels(
@@ -837,71 +771,55 @@ class BuildAndInstallRequest(object):
 
         # 3. All requirements are now in wheel form: calculate any missing direct requirement
         #    project names from the wheel names.
-        direct_requirements = DirectRequirements.calculate(
-            self._direct_requirements,
-            build_results,
-            local_project_directory_to_sdist=local_project_directory_to_sdist,
-        )
+        with TRACER.timed(
+            "Calculating project names for direct requirements:"
+            "\n  {}".format("\n  ".join(map(str, self._direct_requirements)))
+        ):
 
-        return direct_requirements, all_install_requests
+            def iter_direct_requirements():
+                # type: () -> Iterator[Requirement]
+                for requirement in self._direct_requirements:
+                    if not isinstance(requirement, LocalProjectRequirement):
+                        yield requirement.requirement
+                        continue
 
-    def build_distributions(
-        self,
-        ignore_errors=False,  # type: bool
-        max_parallel_jobs=None,  # type: Optional[int]
-        local_project_directory_to_sdist=None,  # type: Optional[Mapping[str, str]]
-    ):
-        # type: (...) -> Iterable[ResolvedDistribution]
+                    install_reqs = build_results.get(requirement.path)
+                    if not install_reqs and local_project_directory_to_sdist:
+                        local_project_directory = local_project_directory_to_sdist.get(
+                            requirement.path
+                        )
+                        if local_project_directory:
+                            install_reqs = build_results.get(local_project_directory)
+                    if not install_reqs:
+                        raise AssertionError(
+                            "Failed to compute a project name for {requirement}. No corresponding "
+                            "wheel was found from amongst:\n{install_requests}".format(
+                                requirement=requirement,
+                                install_requests="\n".join(
+                                    sorted(
+                                        "{path} -> {wheel_path} {fingerprint}".format(
+                                            path=path,
+                                            wheel_path=build_result.wheel_path,
+                                            fingerprint=build_result.fingerprint,
+                                        )
+                                        for path, build_results in build_results.items()
+                                        for build_result in build_results
+                                    )
+                                ),
+                            )
+                        )
+                    for install_req in install_reqs:
+                        yield requirement.as_requirement(dist=install_req.wheel_path)
 
-        if not any((self._build_requests, self._install_requests)):
-            # Nothing to build or install.
-            return ()
+            direct_requirements_by_project_name = defaultdict(
+                OrderedSet
+            )  # type: DefaultDict[ProjectName, OrderedSet[Requirement]]
+            for direct_requirement in iter_direct_requirements():
+                direct_requirements_by_project_name[direct_requirement.project_name].add(
+                    direct_requirement
+                )
 
-        direct_requirements, all_install_requests = self._build_distributions(
-            max_parallel_jobs=max_parallel_jobs,
-            local_project_directory_to_sdist=local_project_directory_to_sdist,
-        )
-
-        wheels = OrderedSet(
-            ResolvedDistribution(
-                target=install_request.target,
-                fingerprinted_distribution=FingerprintedDistribution(
-                    distribution=Distribution.load(install_request.wheel_path),
-                    fingerprint=install_request.fingerprint,
-                ),
-            )
-            for install_request in all_install_requests
-        )  # type: OrderedSet[ResolvedDistribution]
-
-        if not ignore_errors:
-            with TRACER.timed("Checking build"):
-                self._check(wheels)
-        return direct_requirements.adjust(wheels)
-
-    def install_distributions(
-        self,
-        ignore_errors=False,  # type: bool
-        max_parallel_jobs=None,  # type: Optional[int]
-        local_project_directory_to_sdist=None,  # type: Optional[Mapping[str, str]]
-    ):
-        # type: (...) -> Iterable[ResolvedDistribution]
-
-        if not any((self._build_requests, self._install_requests)):
-            # Nothing to build or install.
-            return ()
-
-        installed_wheels_dir = os.path.join(ENV.PEX_ROOT, PexInfo.INSTALL_CACHE)
-        perform_install = functools.partial(_perform_install, installed_wheels_dir)
-
-        installations = []  # type: List[ResolvedDistribution]
-
-        # 1. Gather all wheels to install, building sdists and local projects if needed.
-        direct_requirements, all_install_requests = self._build_distributions(
-            max_parallel_jobs=max_parallel_jobs,
-            local_project_directory_to_sdist=local_project_directory_to_sdist,
-        )
-
-        # 2. Install wheels in individual chroots.
+        # 4. Install wheels in individual chroots.
 
         # Dedup by wheel name; e.g.: only install universal wheels once even though they'll get
         # downloaded / built for each interpreter or platform.
@@ -931,43 +849,48 @@ class BuildAndInstallRequest(object):
             for install_result in install_results:
                 add_installation(install_result)
 
-            try:
-                for install_result in iter_map_parallel(
-                    inputs=install_requests,
-                    function=perform_install,
-                    noun="wheel",
-                    verb="install",
-                    verb_past="installed",
-                    max_jobs=max_parallel_jobs,
-                    costing_function=lambda req: os.path.getsize(req.wheel_path),
-                    result_render_function=InstallResult.wheel_file,
-                ):
-                    add_installation(install_result)
-            except WheelError as e:
-                raise Untranslatable("Failed to install a wheel: {err}".format(err=e))
+            for install_result in execute_parallel(
+                inputs=install_requests,
+                spawn_func=spawn_install,
+                error_handler=Raise[InstallRequest, InstallResult](Untranslatable),
+                max_jobs=max_parallel_jobs,
+            ):
+                add_installation(install_result)
 
         if not ignore_errors:
             with TRACER.timed("Checking install"):
-                self._check(installations)
-        return direct_requirements.adjust(installations)
+                self._check_install(installations)
+
+        installed_distributions = OrderedSet()  # type: OrderedSet[InstalledDistribution]
+        for installed_distribution in installations:
+            distribution = installed_distribution.distribution
+            direct_reqs = [
+                req
+                for req in direct_requirements_by_project_name[distribution.metadata.project_name]
+                if distribution in req and installed_distribution.target.requirement_applies(req)
+            ]
+            installed_distributions.add(
+                installed_distribution.with_direct_requirements(direct_requirements=direct_reqs)
+            )
+        return installed_distributions
 
     @staticmethod
-    def _check(resolved_distributions):
-        # type: (Iterable[ResolvedDistribution]) -> None
-        resolved_distribution_by_project_name = OrderedDict(
+    def _check_install(installed_distributions):
+        # type: (Iterable[InstalledDistribution]) -> None
+        installed_distribution_by_project_name = OrderedDict(
             (resolved_distribution.distribution.metadata.project_name, resolved_distribution)
-            for resolved_distribution in resolved_distributions
-        )  # type: OrderedDict[ProjectName, ResolvedDistribution]
+            for resolved_distribution in installed_distributions
+        )  # type: OrderedDict[ProjectName, InstalledDistribution]
 
         unsatisfied = []
-        for resolved_distribution in resolved_distribution_by_project_name.values():
-            dist = resolved_distribution.distribution
-            target = resolved_distribution.target
+        for installed_distribution in installed_distribution_by_project_name.values():
+            dist = installed_distribution.distribution
+            target = installed_distribution.target
             for requirement in dist.requires():
                 if not target.requirement_applies(requirement):
                     continue
 
-                installed_requirement_dist = resolved_distribution_by_project_name.get(
+                installed_requirement_dist = installed_distribution_by_project_name.get(
                     requirement.project_name
                 )
                 if not installed_requirement_dist:
@@ -977,13 +900,13 @@ class BuildAndInstallRequest(object):
                         )
                     )
                 else:
-                    resolved_dist = installed_requirement_dist.distribution
-                    if not requirement.specifier.contains(resolved_dist.version, prereleases=True):
+                    installed_dist = installed_requirement_dist.distribution
+                    if not requirement.specifier.contains(installed_dist.version, prereleases=True):
                         unsatisfied.append(
                             "{dist} requires {requirement} but {resolved_dist} was resolved".format(
                                 dist=dist.as_requirement(),
                                 requirement=requirement,
-                                resolved_dist=resolved_dist,
+                                resolved_dist=installed_dist,
                             )
                         )
 
@@ -1022,7 +945,11 @@ def resolve(
     resolver_version=None,  # type: Optional[ResolverVersion.Value]
     network_configuration=None,  # type: Optional[NetworkConfiguration]
     password_entries=(),  # type: Iterable[PasswordEntry]
-    build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+    build=True,  # type: bool
+    use_wheel=True,  # type: bool
+    prefer_older_binary=False,  # type: bool
+    use_pep517=None,  # type: Optional[bool]
+    build_isolation=True,  # type: bool
     compile=False,  # type: bool
     max_parallel_jobs=None,  # type: Optional[int]
     ignore_errors=False,  # type: bool
@@ -1031,9 +958,8 @@ def resolve(
     pip_version=None,  # type: Optional[PipVersionValue]
     resolver=None,  # type: Optional[Resolver]
     use_pip_config=False,  # type: bool
-    result_type=InstallableType.INSTALLED_WHEEL_CHROOT,  # type: InstallableType.Value
 ):
-    # type: (...) -> ResolveResult
+    # type: (...) -> Installed
     """Resolves all distributions needed to meet requirements for multiple distribution targets.
 
     The resulting distributions are installed in individual chroots that can be independently added
@@ -1058,7 +984,18 @@ def resolve(
     :keyword network_configuration: Configuration for network requests made downloading and building
       distributions.
     :keyword password_entries: Any known authentication information needed for resolving.
-    :keyword build_configuration: The configuration for building resolved projects.
+    :keyword build: Whether to allow building source distributions when no wheel is found.
+      Defaults to ``True``.
+    :keyword use_wheel: Whether to allow resolution of pre-built wheel distributions.
+      Defaults to ``True``.
+    :keyword prefer_older_binary: Whether to prefer older binary distributions to newer source
+      distributions (avoid building wheels when possible). Defaults to ``False``.
+    :keyword use_pep517: Whether to force use of PEP 517 for building source distributions into
+      wheels or force direct invocation of ``setup.py bdist_wheel``. Defaults to using PEP-517 only
+      when a ``pyproject.toml`` file is present with a ``build-system`` section.
+    :keyword build_isolation: Disable ``sys.path`` isolation when building a modern source
+      distribution. Build dependencies specified by PEP 518 must already be installed on the
+      ``sys.path`` if `build_isolation` is ``True``.
     :keyword compile: Whether to pre-compile resolved distribution python sources.
       Defaults to ``False``.
     :keyword max_parallel_jobs: The maximum number of parallel jobs to use when resolving,
@@ -1092,8 +1029,7 @@ def resolve(
     #
     # This means we need to separately resolve all distributions, then install each in their own
     # chroot. To do this we use `pip download` for the resolve and download of all needed
-    # distributions and then `pex.pep_427.install_wheel_chroot` to install each distribution in its
-    # own chroot.
+    # distributions and then `pip install` to install each distribution in its own chroot.
     #
     # As a complicating factor, the runtime activation scheme relies on PEP 425 tags; i.e.: wheel
     # names. Some requirements are only available or applicable in source form - either via sdist,
@@ -1124,7 +1060,11 @@ def resolve(
         allow_prereleases=allow_prereleases,
         transitive=transitive,
         package_index_configuration=package_index_configuration,
-        build_configuration=build_configuration,
+        build=build,
+        use_wheel=use_wheel,
+        prefer_older_binary=prefer_older_binary,
+        use_pep517=use_pep517,
+        build_isolation=build_isolation,
         max_parallel_jobs=max_parallel_jobs,
         preserve_log=preserve_log,
         pip_version=pip_version,
@@ -1142,23 +1082,21 @@ def resolve(
         direct_requirements=direct_requirements,
         package_index_configuration=package_index_configuration,
         compile=compile,
-        build_configuration=build_configuration,
+        prefer_older_binary=prefer_older_binary,
+        use_pep517=use_pep517,
+        build_isolation=build_isolation,
         verify_wheels=verify_wheels,
         pip_version=pip_version,
         resolver=resolver,
     )
 
     ignore_errors = ignore_errors or not transitive
-    distributions = tuple(
+    installed_distributions = tuple(
         build_and_install_request.install_distributions(
             ignore_errors=ignore_errors, max_parallel_jobs=max_parallel_jobs
         )
-        if result_type is InstallableType.INSTALLED_WHEEL_CHROOT
-        else build_and_install_request.build_distributions(
-            ignore_errors=ignore_errors, max_parallel_jobs=max_parallel_jobs
-        )
     )
-    return ResolveResult(distributions=distributions, type=result_type)
+    return Installed(installed_distributions=installed_distributions)
 
 
 def _download_internal(
@@ -1170,7 +1108,11 @@ def _download_internal(
     allow_prereleases=False,  # type: bool
     transitive=True,  # type: bool
     package_index_configuration=None,  # type: Optional[PackageIndexConfiguration]
-    build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+    build=True,  # type: bool
+    use_wheel=True,  # type: bool
+    prefer_older_binary=False,  # type: bool
+    use_pep517=None,  # type: Optional[bool]
+    build_isolation=True,  # type: bool
     dest=None,  # type: Optional[str]
     max_parallel_jobs=None,  # type: Optional[int]
     observer=None,  # type: Optional[ResolveObserver]
@@ -1190,7 +1132,11 @@ def _download_internal(
         allow_prereleases=allow_prereleases,
         transitive=transitive,
         package_index_configuration=package_index_configuration,
-        build_configuration=build_configuration,
+        build=build,
+        use_wheel=use_wheel,
+        prefer_older_binary=prefer_older_binary,
+        use_pep517=use_pep517,
+        build_isolation=build_isolation,
         observer=observer,
         preserve_log=preserve_log,
         pip_version=pip_version,
@@ -1208,7 +1154,7 @@ def _download_internal(
 class LocalDistribution(object):
     path = attr.ib()  # type: str
     fingerprint = attr.ib()  # type: str
-    target = attr.ib(factory=targets.current)  # type: Target
+    target = attr.ib(default=targets.current())  # type: Target
 
     @fingerprint.default
     def _calculate_fingerprint(self):
@@ -1247,7 +1193,11 @@ def download(
     resolver_version=None,  # type: Optional[ResolverVersion.Value]
     network_configuration=None,  # type: Optional[NetworkConfiguration]
     password_entries=(),  # type: Iterable[PasswordEntry]
-    build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+    build=True,  # type: bool
+    use_wheel=True,  # type: bool
+    prefer_older_binary=False,  # type: bool
+    use_pep517=None,  # type: Optional[bool]
+    build_isolation=True,  # type: bool
     dest=None,  # type: Optional[str]
     max_parallel_jobs=None,  # type: Optional[int]
     observer=None,  # type: Optional[ResolveObserver]
@@ -1278,7 +1228,18 @@ def download(
     :keyword network_configuration: Configuration for network requests made downloading and building
       distributions.
     :keyword password_entries: Any known authentication information needed for downloading.
-    :keyword build_configuration: The configuration for building resolved projects.
+    :keyword build: Whether to allow building source distributions when no wheel is found.
+      Defaults to ``True``.
+    :keyword use_wheel: Whether to allow resolution of pre-built wheel distributions.
+      Defaults to ``True``.
+    :keyword prefer_older_binary: Whether to prefer older binary distributions to newer source
+      distributions (avoid building wheels when possible). Defaults to ``False``.
+    :keyword use_pep517: Whether to force use of PEP 517 for building source distributions into
+      wheels or force direct invocation of ``setup.py bdist_wheel``. Defaults to using PEP-517 only
+      when a ``pyproject.toml`` file is present with a ``build-system`` section.
+    :keyword build_isolation: Disable ``sys.path`` isolation when building a modern source
+      distribution. Build dependencies specified by PEP 518 must already be installed on the
+      ``sys.path`` if `build_isolation` is ``True``.
     :keyword dest: A directory path to download distributions to.
     :keyword max_parallel_jobs: The maximum number of parallel jobs to use when resolving,
       building and installing distributions in a resolve. Defaults to the number of CPUs available.
@@ -1309,7 +1270,11 @@ def download(
         allow_prereleases=allow_prereleases,
         transitive=transitive,
         package_index_configuration=package_index_configuration,
-        build_configuration=build_configuration,
+        build=build,
+        use_wheel=use_wheel,
+        prefer_older_binary=prefer_older_binary,
+        use_pep517=use_pep517,
+        build_isolation=build_isolation,
         dest=dest,
         max_parallel_jobs=max_parallel_jobs,
         observer=observer,

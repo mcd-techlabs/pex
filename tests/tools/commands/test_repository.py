@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -15,9 +15,6 @@ import pytest
 
 from pex.common import DETERMINISTIC_DATETIME, open_zip, safe_open, temporary_dir
 from pex.dist_metadata import Distribution, Requirement
-from pex.pip.installation import get_pip
-from pex.pip.version import PipVersion
-from pex.resolve.resolver_configuration import BuildConfiguration
 from pex.third_party.packaging.specifiers import SpecifierSet
 from pex.typing import TYPE_CHECKING
 from testing import PY310, ensure_python_venv, run_command_with_jitter, run_pex_command
@@ -214,16 +211,6 @@ def test_extract_deterministic_wheels(pex, pex_tools_env):
 
 def test_extract_lifecycle(pex, pex_tools_env, tmpdir):
     # type: (str, Dict[str, str], Any) -> None
-
-    # Since we'll be locking down indexes to just find-links, we need to include the wheel .whl
-    # needed by vendored Pip.
-    vendored_pip_dists_dir = os.path.join(str(tmpdir), "vendored-pip-dists")
-    get_pip().spawn_download_distributions(
-        download_dir=vendored_pip_dists_dir,
-        requirements=[PipVersion.VENDORED.wheel_requirement],
-        build_configuration=BuildConfiguration.create(allow_builds=False),
-    ).wait()
-
     dists_dir = os.path.join(str(tmpdir), "dists")
     pid_file = os.path.join(str(tmpdir), "pid")
     os.mkfifo(pid_file)
@@ -251,8 +238,6 @@ def test_extract_lifecycle(pex, pex_tools_env, tmpdir):
             "--no-pypi",
             "--find-links",
             find_links_url,
-            "--find-links",
-            vendored_pip_dists_dir,
             "example",
             "-c",
             "example",
@@ -272,5 +257,5 @@ def test_extract_lifecycle(pex, pex_tools_env, tmpdir):
     assert -1 * int(signal.SIGTERM) == find_links_server.wait()
 
     expected_output = b"Fetching from https://example.com ...\n"
-    assert expected_output in subprocess.check_output(args=[example_sdist_pex])
-    assert expected_output in subprocess.check_output(args=[example_console_script])
+    assert expected_output == subprocess.check_output(args=[example_sdist_pex])
+    assert expected_output == subprocess.check_output(args=[example_console_script])

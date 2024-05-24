@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 """pex support for interacting with interpreters."""
@@ -75,41 +75,6 @@ def calculate_binary_name(
     return "{name}{version}".format(name=name, version=".".join(map(str, python_version)))
 
 
-class SitePackagesDir(object):
-    def __init__(self, path):
-        # type: (str) -> None
-        self._path = os.path.realpath(path)
-
-    @property
-    def path(self):
-        # type: () -> str
-        return self._path
-
-    def __repr__(self):
-        # type: () -> str
-        return "{class_name}({path})".format(class_name=self.__class__.__name__, path=self._path)
-
-    def __eq__(self, other):
-        # type: (Any) -> bool
-        return type(self) is type(other) and self._path == other._path
-
-    def __ne__(self, other):
-        # type: (Any) -> bool
-        return not self == other
-
-    def __hash__(self):
-        # type: () -> int
-        return hash((type(self), self._path))
-
-
-class Purelib(SitePackagesDir):
-    pass
-
-
-class Platlib(SitePackagesDir):
-    pass
-
-
 class PythonIdentity(object):
     class Error(Exception):
         pass
@@ -130,75 +95,44 @@ class PythonIdentity(object):
         # type: (Any) -> Optional[str]
 
         # N.B.: Sometimes MACOSX_DEPLOYMENT_TARGET can be configured as a float.
-        # See: https://github.com/pex-tool/pex/issues/1337
+        # See: https://github.com/pantsbuild/pex/issues/1337
         if value is None:
             return None
         return str(value)
 
     @staticmethod
-    def _site_packages_dirs():
-        # type: () -> Iterable[SitePackagesDir]
+    def _iter_site_packages():
+        # type: () -> Iterator[str]
 
-        # N.B.: The paths returned by site.getsitepackages are un-differentiated; so we let any
-        # purelib or platlib directories discovered below trump for a given path so that we pick up
-        # the extra bit of information about the site packages directory type.
-
-        site_packages = OrderedDict()  # type: OrderedDict[str, SitePackagesDir]
         try:
             from site import getsitepackages
 
             for path in getsitepackages():
-                entry = SitePackagesDir(path)
-                site_packages[entry.path] = entry
+                yield path
         except ImportError as e:
             # The site.py provided by old virtualenv (which we use to create some venvs) does not
             # include a getsitepackages function.
             TRACER.log("The site module does not define getsitepackages: {err}".format(err=e))
 
-        # The distutils package was deprecated in 3.10 and removed in 3.12. The sysconfig module was
-        # introduced in 3.2 but is not usable for our purposes until 3.11. We need
-        # `get_default_scheme` to get the current interpreter's installation scheme, which was made
-        # public in 3.10, but not made correct for venv interpreters until 3.11.
-        try:
-            import sysconfig
-
-            get_default_scheme = getattr(sysconfig, "get_default_scheme", None)
-            if get_default_scheme and sys.version_info[:2] >= (3, 11):
-                scheme = get_default_scheme()
-
-                purelib = Purelib(sysconfig.get_path("purelib", scheme))
-                site_packages[purelib.path] = purelib
-
-                platlib = Platlib(sysconfig.get_path("platlib", scheme))
-                site_packages[platlib.path] = platlib
-
-                return site_packages.values()
-        except ImportError:
-            pass
-
-        # The distutils.sysconfig module is deprecated in Python 3.10 but still around. It goes away
-        # in 3.12 with viable replacements in sysconfig starting in Python 3.11. See above where we
-        # use those replacements preferentially, when available.
         try:
             from distutils.sysconfig import get_python_lib
 
-            purelib = Purelib(get_python_lib(plat_specific=False))
-            site_packages[purelib.path] = purelib
-
-            platlib = Platlib(get_python_lib(plat_specific=True))
-            site_packages[platlib.path] = platlib
-        except ImportError:
-            pass
-
-        return site_packages.values()
+            yield get_python_lib(plat_specific=False)
+            yield get_python_lib(plat_specific=True)
+        except ImportError as e:
+            # The distutils.sysconfig module is deprecated in Python 3.10 but still around.
+            # Eventually it will go away with replacements in sysconfig that we'll add at that time
+            # as another site packages source.
+            TRACER.log(
+                "The distutils.sysconfig module does not define get_python_lib: {err}".format(err=e)
+            )
 
     @staticmethod
     def _iter_extras_paths(site_packages):
-        # type: (Iterable[SitePackagesDir]) -> Iterator[str]
+        # type: (Iterable[str]) -> Iterator[str]
 
         # Handle .pth injected paths as extras.
-        for entry in site_packages:
-            dir_path = entry.path
+        for dir_path in site_packages:
             if not os.path.isdir(dir_path):
                 continue
             for file in os.listdir(dir_path):
@@ -235,21 +169,18 @@ class PythonIdentity(object):
         # vendored attrs distribution so that its `cache_hash=True` feature can work (see the
         # bottom of pex/third_party/__init__.py where the vendor importer is installed). We ignore
         # such adjoined `sys.path` entries to discover the true base interpreter `sys.path`.
-        pythonpath = os.environ.get("PYTHONPATH")
-        internal_entries = frozenset(
-            (pythonpath.split(os.pathsep) if pythonpath else []) + list(third_party.exposed())
+        pythonpath = frozenset(
+            os.environ.get("PYTHONPATH", "").split(os.pathsep) + list(third_party.exposed())
         )
-        sys_path = OrderedSet(
-            entry for entry in sys.path if entry and entry not in internal_entries
-        )
+        sys_path = OrderedSet(item for item in sys.path if item and item not in pythonpath)
 
         site_packages = OrderedSet(
-            site_packages_dir
-            for site_packages_dir in cls._site_packages_dirs()
+            path
+            for path in cls._iter_site_packages()
             # On Windows getsitepackages() includes sys.prefix as a historical vestige. In PEP-250
             # Windows got a proper dedicated directory for this which is what is used in the Pythons
             # we support. See: https://peps.python.org/pep-0250/
-            if site_packages_dir.path != sys.prefix
+            if path != sys.prefix
         )
 
         extras_paths = OrderedSet(cls._iter_extras_paths(site_packages=site_packages))
@@ -267,52 +198,22 @@ class PythonIdentity(object):
             sys_path=sys_path,
             site_packages=site_packages,
             extras_paths=extras_paths,
-            paths=sysconfig.get_paths(),
             packaging_version=packaging_version,
             python_tag=preferred_tag.interpreter,
             abi_tag=preferred_tag.abi,
             platform_tag=preferred_tag.platform,
-            version=cast("Tuple[int, int, int]", tuple(sys.version_info[:3])),
-            pypy_version=cast(
-                "Optional[Tuple[int, int, int]]",
-                tuple(getattr(sys, "pypy_version_info", ())[:3]) or None,
-            ),
+            version=sys.version_info[:3],
             supported_tags=supported_tags,
             env_markers=MarkerEnvironment.default(),
             configured_macosx_deployment_target=configured_macosx_deployment_target,
         )
 
-    # Increment this integer version number when changing the encode / decode format or content.
-    _FORMAT_VERSION = 1
-
     @classmethod
     def decode(cls, encoded):
-        # type: (Text) -> PythonIdentity
-        TRACER.log("creating PythonIdentity from encoded: {encoded}".format(encoded=encoded), V=9)
+        TRACER.log("creating PythonIdentity from encoded: %s" % encoded, V=9)
         values = json.loads(encoded)
-        if len(values) != 19:
-            raise cls.InvalidError(
-                "Invalid interpreter identity: {encoded}".format(encoded=encoded)
-            )
-        try:
-            format_version = int(values.pop("__format_version__", "0"))
-        except ValueError as e:
-            raise cls.InvalidError(
-                "The PythonIdentity __format_version__ is invalid: {err}".format(err=e)
-            )
-        else:
-            if format_version < cls._FORMAT_VERSION:
-                raise cls.InvalidError(
-                    "The PythonIdentity __format_version__ was {format_version}, but the current "
-                    "version is {current_version}. Upgrading existing encoding: {encoded}".format(
-                        format_version=format_version,
-                        current_version=cls._FORMAT_VERSION,
-                        encoded=encoded,
-                    )
-                )
-
-        version = tuple(values.pop("version"))
-        pypy_version = tuple(values.pop("pypy_version") or ()) or None
+        if len(values) != 14:
+            raise cls.InvalidError("Invalid interpreter identity: %s" % encoded)
 
         supported_tags = values.pop("supported_tags")
 
@@ -321,29 +222,13 @@ class PythonIdentity(object):
                 yield tags.Tag(interpreter=interpreter, abi=abi, platform=platform)
 
         # N.B.: Old encoded identities may have numeric values; so we support these and convert
-        # back to strings here as needed. See: https://github.com/pex-tool/pex/issues/1337
+        # back to strings here as needed. See: https://github.com/pantsbuild/pex/issues/1337
         configured_macosx_deployment_target = cls._normalize_macosx_deployment_target(
             values.pop("configured_macosx_deployment_target")
         )
 
         env_markers = MarkerEnvironment(**values.pop("env_markers"))
-
-        site_packages_paths = values.pop("site_packages")
-        purelib = values.pop("purelib")
-        platlib = values.pop("platlib")
-        site_packages = []  # type: List[SitePackagesDir]
-        for path in site_packages_paths:
-            if path == purelib:
-                site_packages.append(Purelib(path))
-            elif path == platlib:
-                site_packages.append(Platlib(path))
-            else:
-                site_packages.append(SitePackagesDir(path))
-
         return cls(
-            site_packages=site_packages,
-            version=cast("Tuple[int, int, int]", version),
-            pypy_version=cast("Optional[Tuple[int, int, int]]", pypy_version),
             supported_tags=iter_tags(),
             configured_macosx_deployment_target=configured_macosx_deployment_target,
             env_markers=env_markers,
@@ -363,15 +248,13 @@ class PythonIdentity(object):
         prefix,  # type: str
         base_prefix,  # type: str
         sys_path,  # type: Iterable[str]
-        site_packages,  # type: Iterable[SitePackagesDir]
+        site_packages,  # type: Iterable[str]
         extras_paths,  # type: Iterable[str]
-        paths,  # type: Mapping[str, str]
         packaging_version,  # type: str
         python_tag,  # type: str
         abi_tag,  # type: str
         platform_tag,  # type: str
-        version,  # type: Tuple[int, int, int]
-        pypy_version,  # type: Optional[Tuple[int, int, int]]
+        version,  # type: Iterable[int]
         supported_tags,  # type: Iterable[tags.Tag]
         env_markers,  # type: MarkerEnvironment
         configured_macosx_deployment_target,  # type: Optional[str]
@@ -387,48 +270,28 @@ class PythonIdentity(object):
         self._sys_path = tuple(sys_path)
         self._site_packages = tuple(site_packages)
         self._extras_paths = tuple(extras_paths)
-        self._paths = dict(paths)
         self._packaging_version = packaging_version
         self._python_tag = python_tag
         self._abi_tag = abi_tag
         self._platform_tag = platform_tag
-        self._version = version
-        self._pypy_version = pypy_version
+        self._version = tuple(version)
         self._supported_tags = CompatibilityTags(tags=supported_tags)
         self._env_markers = env_markers
         self._configured_macosx_deployment_target = configured_macosx_deployment_target
 
     def encode(self):
-        site_packages = []  # type: List[str]
-        purelib = None  # type: Optional[str]
-        platlib = None  # type: Optional[str]
-        for entry in self._site_packages:
-            site_packages.append(entry.path)
-            if isinstance(entry, Purelib):
-                purelib = entry.path
-            elif isinstance(entry, Platlib):
-                platlib = entry.path
-
         values = dict(
-            __format_version__=self._FORMAT_VERSION,
             binary=self._binary,
             prefix=self._prefix,
             base_prefix=self._base_prefix,
             sys_path=self._sys_path,
-            site_packages=site_packages,
-            # N.B.: We encode purelib and platlib site-packages entries on the side like this to
-            # ensure older Pex versions that did not know the distinction can still use the
-            # interpreter cache.
-            purelib=purelib,
-            platlib=platlib,
+            site_packages=self._site_packages,
             extras_paths=self._extras_paths,
-            paths=self._paths,
             packaging_version=self._packaging_version,
             python_tag=self._python_tag,
             abi_tag=self._abi_tag,
             platform_tag=self._platform_tag,
             version=self._version,
-            pypy_version=self._pypy_version,
             supported_tags=[
                 (tag.interpreter, tag.abi, tag.platform) for tag in self._supported_tags
             ],
@@ -440,11 +303,6 @@ class PythonIdentity(object):
     @property
     def binary(self):
         return self._binary
-
-    @property
-    def is_venv(self):
-        # type: () -> bool
-        return self._prefix != self._base_prefix
 
     @property
     def prefix(self):
@@ -463,18 +321,13 @@ class PythonIdentity(object):
 
     @property
     def site_packages(self):
-        # type: () -> Tuple[SitePackagesDir, ...]
+        # type: () -> Tuple[str, ...]
         return self._site_packages
 
     @property
     def extras_paths(self):
         # type: () -> Tuple[str, ...]
         return self._extras_paths
-
-    @property
-    def paths(self):
-        # type: () -> Mapping[str, str]
-        return self._paths
 
     @property
     def python_tag(self):
@@ -495,22 +348,7 @@ class PythonIdentity(object):
 
         Consistent with `sys.version_info`, the tuple corresponds to `<major>.<minor>.<micro>`.
         """
-        return self._version
-
-    @property
-    def pypy_version(self):
-        # type: () -> Optional[Tuple[int, int, int]]
-        """The PyPy implementation version as a normalized tuple.
-
-        Only present for PyPy interpreters and, consistent with `sys.pypy_version_info`, the tuple
-        corresponds to `<major>.<minor>.<micro>`.
-        """
-        return self._pypy_version
-
-    @property
-    def is_pypy(self):
-        # type: () -> bool
-        return bool(self._pypy_version)
+        return cast("Tuple[int, int, int]", self._version)
 
     @property
     def version_str(self):
@@ -560,7 +398,11 @@ class PythonIdentity(object):
     def hashbang(self):
         # type: () -> str
         return "#!/usr/bin/env {}".format(
-            self.binary_name(version_components=0 if self.is_pypy and self.version[0] == 2 else 2)
+            self.binary_name(
+                version_components=0
+                if self._interpreter_name == "PyPy" and self.version[0] == 2
+                else 2
+            )
         )
 
     @property
@@ -1137,6 +979,9 @@ class PythonInterpreter(object):
         cached_interpreter = cls._PYTHON_INTERPRETER_BY_NORMALIZED_PATH.get(canonicalized_binary)
         if cached_interpreter is not None:
             return SpawnedJob.completed(cached_interpreter)
+        if canonicalized_binary == cls.canonicalize_path(sys.executable):
+            current_interpreter = cls(PythonIdentity.get())
+            return SpawnedJob.completed(current_interpreter)
         return cls._spawn_from_binary_external(canonicalized_binary)
 
     @classmethod
@@ -1304,7 +1149,7 @@ class PythonInterpreter(object):
     def is_venv(self):
         # type: () -> bool
         """Return `True` if this interpreter is homed in a virtual environment."""
-        return self._identity.is_venv
+        return self._identity.prefix != self._identity.base_prefix
 
     @property
     def prefix(self):
@@ -1328,7 +1173,7 @@ class PythonInterpreter(object):
 
     @property
     def site_packages(self):
-        # type: () -> Tuple[SitePackagesDir, ...]
+        # type: () -> Tuple[str, ...]
         """Return the interpreter's site packages directories."""
         return self.identity.site_packages
 
@@ -1376,7 +1221,7 @@ class PythonInterpreter(object):
         version = self._identity.version
         abi_tag = self._identity.abi_tag
 
-        prefix = "pypy" if self.is_pypy else "python"
+        prefix = "pypy" if self._identity.interpreter == "PyPy" else "python"
         suffixes = ("{}.{}".format(version[0], version[1]), str(version[0]), "")
         candidate_binaries = tuple("{}{}".format(prefix, suffix) for suffix in suffixes)
 
@@ -1429,11 +1274,6 @@ class PythonInterpreter(object):
         return self._identity
 
     @property
-    def is_pypy(self):
-        # type: () -> bool
-        return self._identity.is_pypy
-
-    @property
     def python(self):
         return self._identity.python
 
@@ -1462,14 +1302,6 @@ class PythonInterpreter(object):
         if self._supported_platforms is None:
             self._supported_platforms = frozenset(self._identity.iter_supported_platforms())
         return self._supported_platforms
-
-    def shebang(self, args=None):
-        # type: (Optional[Text]) -> Text
-        """Return the contents of an appropriate shebang for this interpreter and args.
-
-        The shebang will include the leading `#!` but will not include a trailing new line character.
-        """
-        return create_shebang(self._binary, python_args=args)
 
     def create_isolated_cmd(
         self,
@@ -1596,56 +1428,10 @@ def spawn_python_job(
         # need to set `__PEX_UNVENDORED__`. See: vendor.__main__.ImportRewriter._modify_import.
         subprocess_env["__PEX_UNVENDORED__"] = "1"
 
-        pythonpath.extend(third_party.expose(expose, interpreter=interpreter))
+        pythonpath.extend(third_party.expose(expose))
 
     interpreter = interpreter or PythonInterpreter.get()
     cmd, process = interpreter.open_process(
         args=args, pythonpath=pythonpath, env=subprocess_env, **subprocess_kwargs
     )
     return Job(command=cmd, process=process)
-
-
-# See the "Test results from various systems" table here:
-#  https://www.in-ulm.de/~mascheck/various/shebang/#length
-MAX_SHEBANG_LENGTH = 512 if sys.platform == "darwin" else 128
-
-
-def create_shebang(
-    python_exe,  # type: Text
-    python_args=None,  # type: Optional[Text]
-    max_shebang_length=MAX_SHEBANG_LENGTH,  # type: int
-):
-    # type: (...) -> Text
-    """Return the contents of an appropriate shebang for the given Python interpreter and args.
-
-    The shebang will include the leading `#!` but will not include a trailing new line character.
-    """
-    python = "{exe} {args}".format(exe=python_exe, args=python_args) if python_args else python_exe
-    shebang = "#!{python}".format(python=python)
-
-    # N.B.: We add 1 to be conservative and account for the EOL character.
-    if len(shebang) + 1 <= max_shebang_length:
-        return shebang
-
-    # This trick relies on /bin/sh being ubiquitous and the concordance of:
-    # 1. Python: triple quoted strings plus allowance for free-floating string values in
-    #    python files.
-    # 2. sh: Any number of pairs of `'` evaluating away when followed immediately by a
-    #    command string (`''command` -> `command`) and lazy parsing allowing for invalid sh
-    #    content immediately following an exec line.
-    # The end result is a file that is both a valid sh script with a short shebang and a
-    # valid Python program.
-    return (
-        dedent(
-            """\
-            #!/bin/sh
-            # N.B.: This python script executes via a /bin/sh re-exec as a hack to work around a
-            # potential maximum shebang length of {max_shebang_length} bytes on this system which
-            # the python interpreter `exec`ed below would violate.
-            ''''exec {python} "$0" "$@"
-            '''
-            """
-        )
-        .format(max_shebang_length=max_shebang_length, python=python)
-        .strip()
-    )

@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -9,14 +9,15 @@ import shutil
 from pex import hashing
 from pex.atomic_directory import atomic_directory
 from pex.common import safe_mkdir, safe_mkdtemp
+from pex.compatibility import url_unquote, urlparse
 from pex.hashing import Sha256
 from pex.jobs import Job, Raise, SpawnedJob, execute_parallel
 from pex.pip.download_observer import DownloadObserver
 from pex.pip.installation import get_pip
 from pex.pip.tool import PackageIndexConfiguration, Pip
 from pex.resolve import locker
-from pex.resolve.locked_resolve import Artifact, FileArtifact, LockConfiguration
-from pex.resolve.resolved_requirement import ArtifactURL, Fingerprint, PartialArtifact
+from pex.resolve.locked_resolve import Artifact, FileArtifact, LockConfiguration, LockStyle
+from pex.resolve.resolved_requirement import Fingerprint, PartialArtifact
 from pex.resolve.resolvers import Resolver
 from pex.result import Error
 from pex.targets import LocalInterpreter, Target
@@ -50,10 +51,9 @@ def get_downloads_dir(pex_root=None):
 @attr.s(frozen=True)
 class ArtifactDownloader(object):
     resolver = attr.ib()  # type: Resolver
-    lock_configuration = attr.ib()  # type: LockConfiguration
-    target = attr.ib(factory=LocalInterpreter.create)  # type: Target
+    target = attr.ib(default=LocalInterpreter.create())  # type: Target
     package_index_configuration = attr.ib(
-        factory=PackageIndexConfiguration.create
+        default=PackageIndexConfiguration.create()
     )  # type: PackageIndexConfiguration
     max_parallel_jobs = attr.ib(default=None)  # type: Optional[int]
     pip = attr.ib(init=False)  # type: Pip
@@ -80,12 +80,12 @@ class ArtifactDownloader(object):
 
     @staticmethod
     def _create_file_artifact(
-        url,  # type: ArtifactURL
+        url,  # type: str
         fingerprint,  # type: Fingerprint
         verified,  # type: bool
     ):
         # type: (...) -> FileArtifact
-        fingerprinted_artifact = Artifact.from_artifact_url(url, fingerprint, verified=verified)
+        fingerprinted_artifact = Artifact.from_url(url, fingerprint, verified=verified)
         if not isinstance(fingerprinted_artifact, FileArtifact):
             raise ValueError(
                 "Expected a file artifact, given url {url} which is a {artifact}.".format(
@@ -96,16 +96,15 @@ class ArtifactDownloader(object):
 
     def _download(
         self,
-        url,  # type: ArtifactURL
+        url,  # type: str
         download_dir,  # type: str
     ):
         # type: (...) -> Job
 
-        download_url = url.download_url
         for password_entry in self.package_index_configuration.password_entries:
-            credentialed_url = password_entry.maybe_inject_in_url(download_url)
+            credentialed_url = password_entry.maybe_inject_in_url(url)
             if credentialed_url:
-                download_url = credentialed_url
+                url = credentialed_url
                 break
 
         # Although we don't actually need to observe the download, we do need to patch Pip to not
@@ -114,25 +113,26 @@ class ArtifactDownloader(object):
         # restrictions.
         download_observer = DownloadObserver(
             analyzer=None,
-            patch_set=locker.patch(lock_configuration=self.lock_configuration),
+            patch_set=locker.patch(lock_configuration=LockConfiguration(style=LockStyle.UNIVERSAL)),
         )
         return self.pip.spawn_download_distributions(
             download_dir=download_dir,
-            requirements=[download_url],
+            requirements=[url],
             transitive=False,
             package_index_configuration=self.package_index_configuration,
             observer=download_observer,
         )
 
     def _download_and_fingerprint(self, url):
-        # type: (ArtifactURL) -> SpawnedJob[FileArtifact]
+        # type: (str) -> SpawnedJob[FileArtifact]
         downloads = get_downloads_dir()
         download_dir = safe_mkdtemp(prefix="fingerprint_artifact.", dir=downloads)
 
-        src_file = url.path
+        url_info = urlparse.urlparse(url)
+        src_file = url_unquote(url_info.path)
         temp_dest = os.path.join(download_dir, os.path.basename(src_file))
 
-        if url.scheme == "file":
+        if url_info.scheme == "file":
             shutil.copy(src_file, temp_dest)
             return SpawnedJob.completed(
                 self._create_file_artifact(
@@ -149,7 +149,7 @@ class ArtifactDownloader(object):
 
     def _to_file_artifact(self, artifact):
         # type: (PartialArtifact) -> SpawnedJob[FileArtifact]
-        url = artifact.url
+        url = artifact.url.normalized_url
         fingerprint = artifact.fingerprint
         if fingerprint:
             return SpawnedJob.completed(
@@ -174,8 +174,9 @@ class ArtifactDownloader(object):
         # type: (...) -> Union[str, Error]
         dest_file = os.path.join(dest_dir, artifact.filename)
 
-        if artifact.url.scheme == "file":
-            src_file = artifact.url.path
+        url_info = urlparse.urlparse(artifact.url)
+        if url_info.scheme == "file":
+            src_file = url_unquote(url_info.path)
             try:
                 shutil.copy(src_file, dest_file)
             except (IOError, OSError) as e:

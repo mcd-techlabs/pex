@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, print_function
@@ -8,7 +8,6 @@ import itertools
 import os
 import platform
 import random
-import re
 import subprocess
 import sys
 from collections import Counter
@@ -22,13 +21,13 @@ from pex.dist_metadata import Distribution
 from pex.enum import Enum
 from pex.executor import Executor
 from pex.interpreter import PythonInterpreter
-from pex.pep_427 import install_wheel_chroot
 from pex.pex import PEX
 from pex.pex_builder import PEXBuilder
 from pex.pex_info import PexInfo
 from pex.pip.installation import get_pip
 from pex.resolve.configured_resolver import ConfiguredResolver
 from pex.resolve.resolver_configuration import PipConfiguration
+from pex.targets import LocalInterpreter
 from pex.typing import TYPE_CHECKING
 from pex.util import named_temporary_file
 from pex.venv.virtualenv import Virtualenv
@@ -65,12 +64,11 @@ IS_PYPY3 = IS_PYPY and sys.version_info[0] == 3
 NOT_CPYTHON27 = IS_PYPY or PY_VER != (2, 7)
 IS_LINUX = platform.system() == "Linux"
 IS_MAC = platform.system() == "Darwin"
-IS_X86_64 = platform.machine().lower() in ("amd64", "x86_64")
-IS_ARM_64 = platform.machine().lower() in ("arm64", "aarch64")
-IS_LINUX_X86_64 = IS_LINUX and IS_X86_64
-IS_LINUX_ARM64 = IS_LINUX and IS_ARM_64
-IS_MAC_X86_64 = IS_MAC and IS_X86_64
-IS_MAC_ARM64 = IS_MAC and IS_ARM_64
+machine = platform.machine()
+IS_LINUX_X86_64 = IS_LINUX and machine == "x86_64"
+IS_LINUX_ARM64 = IS_LINUX and machine == "aarch64"
+IS_MAC_X86_64 = IS_MAC and machine == "x86_64"
+IS_MAC_ARM64 = IS_MAC and machine == "arm64"
 NOT_CPYTHON27_OR_OSX = NOT_CPYTHON27 or not IS_LINUX
 
 
@@ -96,7 +94,7 @@ def random_bytes(length):
 
 
 def get_dep_dist_names_from_pex(pex_path, match_prefix=""):
-    # type: (str, str) -> Set[Text]
+    # type: (str, str) -> Set[str]
     """Given an on-disk pex, extract all of the unique first-level paths under `.deps`."""
     with open_zip(pex_path) as pex_zip:
         dep_gen = (f.split(os.sep)[1] for f in pex_zip.namelist() if f.startswith(".deps/"))
@@ -281,7 +279,7 @@ def make_bdist(
     with built_wheel(
         name=name, version=version, zip_safe=zip_safe, interpreter=interpreter, **kwargs
     ) as dist_location:
-        yield install_wheel(dist_location)
+        yield install_wheel(dist_location, interpreter=interpreter)
 
 
 def install_wheel(
@@ -290,7 +288,13 @@ def install_wheel(
 ):
     # type: (...) -> Distribution
     install_dir = os.path.join(safe_mkdtemp(), os.path.basename(wheel))
-    install_wheel_chroot(wheel_path=wheel, destination=install_dir)
+    get_pip(
+        interpreter=interpreter, resolver=ConfiguredResolver(pip_configuration=PipConfiguration())
+    ).spawn_install_wheel(
+        wheel=wheel,
+        install_dir=install_dir,
+        target=LocalInterpreter.create(interpreter),
+    ).wait()
     return Distribution.load(install_dir)
 
 
@@ -356,11 +360,6 @@ def write_simple_pex(
     return pb
 
 
-def re_exact(text):
-    # type: (str) -> str
-    return r"^{escaped}$".format(escaped=re.escape(text))
-
-
 @attr.s(frozen=True)
 class IntegResults(object):
     """Convenience object to return integration run results."""
@@ -369,48 +368,17 @@ class IntegResults(object):
     error = attr.ib()  # type: Text
     return_code = attr.ib()  # type: int
 
-    def assert_success(
-        self,
-        expected_output_re=None,  # type: Optional[str]
-        expected_error_re=None,  # type: Optional[str]
-        re_flags=0,  # type: int
-    ):
-        # type: (...) -> None
+    def assert_success(self):
+        # type: () -> None
         assert (
             self.return_code == 0
         ), "integration test failed: return_code={}, output={}, error={}".format(
             self.return_code, self.output, self.error
         )
-        self.assert_output(expected_output_re, expected_error_re, re_flags)
 
-    def assert_failure(
-        self,
-        expected_error_re=None,  # type: Optional[str]
-        expected_output_re=None,  # type: Optional[str]
-        re_flags=0,  # type: int
-    ):
-        # type: (...) -> None
+    def assert_failure(self):
+        # type: () -> None
         assert self.return_code != 0
-        self.assert_output(expected_output_re, expected_error_re, re_flags)
-
-    def assert_output(
-        self,
-        expected_output_re=None,  # type: Optional[str]
-        expected_error_re=None,  # type: Optional[str]
-        re_flags=0,  # type: int
-    ):
-        if expected_output_re:
-            assert re.match(
-                expected_output_re, self.output, flags=re_flags
-            ), "Failed to match re: {re!r} against:\n{output}".format(
-                re=expected_output_re, output=self.output
-            )
-        if expected_error_re:
-            assert re.match(
-                expected_error_re, self.error, flags=re_flags
-            ), "Failed to match re: {re!r} against:\n{output}".format(
-                re=expected_error_re, output=self.error
-            )
 
 
 def create_pex_command(
@@ -699,7 +667,7 @@ def environment_as(**kwargs):
 
 @contextmanager
 def pushd(directory):
-    # type: (Text) -> Iterator[None]
+    # type: (str) -> Iterator[None]
     cwd = os.getcwd()
     try:
         os.chdir(directory)

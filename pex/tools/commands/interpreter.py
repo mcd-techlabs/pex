@@ -1,4 +1,4 @@
-# Copyright 2020 Pex project contributors.
+# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -11,6 +11,7 @@ from pex.commands.command import JsonMixin, OutputMixin
 from pex.interpreter import PythonInterpreter
 from pex.interpreter_constraints import (
     InterpreterConstraint,
+    InterpreterConstraints,
     UnsatisfiableInterpreterConstraintsError,
 )
 from pex.pex import PEX

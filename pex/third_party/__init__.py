@@ -1,4 +1,4 @@
-# Copyright 2018 Pex project contributors.
+# Copyright 2018 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -18,9 +18,7 @@ from collections import OrderedDict, namedtuple
 from pex.typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Container, Iterable, Iterator, List, Optional, Tuple
-
-    from pex.interpreter import PythonInterpreter
+    from typing import Container, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 
 def _tracer():
@@ -177,7 +175,7 @@ class VendorImporter(object):
             for spec in vendor.iter_vendor_specs(
                 # N.B.: The VendorImporter should only see the versions of vendored projects that
                 # support the current Python interpreter.
-                filter_requires_python=sys.version_info[:2]
+                filter_requires_python=True
             )
         )
 
@@ -213,11 +211,13 @@ class VendorImporter(object):
     ):
         # type: (...) -> Iterator[VendorImporter]
         root = cls._abs_root(root)
+        vendored_paths = set(cls._vendored_path_items())
         for importer in cls._iter_all_installed_vendor_importers():
             # All Importables for a given VendorImporter will have the same prefix.
             if importer._importables and importer._importables[0].prefix == prefix:
                 if importer._root == root:
-                    yield importer
+                    if {importable.path for importable in importer._importables} == vendored_paths:
+                        yield importer
 
     @classmethod
     def install_vendored(
@@ -269,7 +269,6 @@ class VendorImporter(object):
         cls,
         dists,  # type: Iterable[str]
         root=None,  # type: Optional[str]
-        interpreter=None,  # type: Optional[PythonInterpreter]
     ):
         # type: (...) -> Iterator[str]
         from pex import vendor
@@ -278,7 +277,7 @@ class VendorImporter(object):
 
         def iter_available():
             yield "pex", root  # The pex distribution itself is trivially available to expose.
-            for spec in vendor.iter_vendor_specs(filter_requires_python=interpreter):
+            for spec in vendor.iter_vendor_specs():
                 yield spec.key, spec.relpath
 
         path_by_key = OrderedDict(
@@ -399,7 +398,7 @@ class IsolationResult(namedtuple("IsolatedPex", ["pex_hash", "chroot_path"])):
     """The result of isolating the current pex distribution to a filesystem chroot."""
 
 
-_ISOLATED = None  # type: Optional[IsolationResult]
+_ISOLATED = None
 
 
 def _isolate_pex_from_dir(
@@ -407,17 +406,13 @@ def _isolate_pex_from_dir(
     isolate_to_dir,  # type: str
     exclude_files,  # type: Container[str]
 ):
-    from pex.common import is_pyc_dir, is_pyc_file, is_pyc_temporary_file, safe_copy
+    from pex.common import filter_pyc_dirs, filter_pyc_files, is_pyc_temporary_file, safe_copy
 
     for root, dirs, files in os.walk(pex_directory):
         relroot = os.path.relpath(root, pex_directory)
-        for d in dirs:
-            if is_pyc_dir(d):
-                continue
+        for d in filter_pyc_dirs(dirs):
             os.makedirs(os.path.join(isolate_to_dir, "pex", relroot, d))
-        for f in files:
-            if is_pyc_file(f):
-                continue
+        for f in filter_pyc_files(files):
             rel_f = os.path.join(relroot, f)
             if not is_pyc_temporary_file(rel_f) and rel_f not in exclude_files:
                 safe_copy(
@@ -447,8 +442,7 @@ def _isolate_pex_from_zip(
                 shutil.copyfileobj(from_fp, to_fp)
 
 
-def isolated(interpreter=None):
-    # type: (Optional[PythonInterpreter]) -> IsolationResult
+def isolated():
     """Returns a chroot for third_party isolated from the ``sys.path``.
 
     PEX will typically be installed in site-packages flat alongside many other distributions; as such,
@@ -457,6 +451,7 @@ def isolated(interpreter=None):
     of pex.
 
     :return: An isolation result.
+    :rtype: :class:`IsolationResult`
     """
     global _ISOLATED
     if _ISOLATED is None:
@@ -471,7 +466,7 @@ def isolated(interpreter=None):
         # PEX_ROOT or built PEXs.
         vendor_lockfiles = tuple(
             os.path.join(os.path.relpath(vendor_spec.relpath, module), "constraints.txt")
-            for vendor_spec in vendor.iter_vendor_specs(filter_requires_python=interpreter)
+            for vendor_spec in vendor.iter_vendor_specs()
         )
 
         pex_zip_paths = None  # type: Optional[Tuple[str, str]]
@@ -559,7 +554,7 @@ def install(root=None, expose=None):
     >>> third_party.install(expose=['setuptools'])
     >>> import sys
     >>> sys.modules.pop('pkg_resources')
-    <module 'pkg_resources' from '/home/jsirois/dev/pex-tool/pex/.tox/py27-repl/lib/python2.7/site-packages/pkg_resources/__init__.pyc'>  # noqa
+    <module 'pkg_resources' from '/home/jsirois/dev/pantsbuild/jsirois-pex/.tox/py27-repl/lib/python2.7/site-packages/pkg_resources/__init__.pyc'>  # noqa
     >>> from pkg_resources import Requirement
     >>> new_req = Requirement.parse('wheel==0.31.1')
     >>> new_req == orig_req
@@ -597,11 +592,8 @@ def exposed(root=None):
                 yield os.path.join(importer.root, importable.path)
 
 
-def expose(
-    dists,  # type: Iterable[str]
-    interpreter=None,  # type: Optional[PythonInterpreter]
-):
-    # type: (...) -> Iterator[str]
+def expose(dists):
+    # type: (Iterable[str]) -> Iterator[str]
     """Exposes vendored code in isolated chroots.
 
     Any vendored distributions listed in ``dists`` will be unpacked to individual chroots for
@@ -609,12 +601,10 @@ def expose(
     distributions and yield the two chroot paths they were unpacked to.
 
     :param dists: A sequence of vendored distribution names to expose.
-    :param interpreter: The target interpreter to expose dists for. The current interpreter by
-                        default.
     :raise: :class:`ValueError` if any distributions to expose cannot be found.
     :returns: An iterator of exposed vendored distribution chroot paths.
     """
-    for path in VendorImporter.expose(dists, root=isolated().chroot_path, interpreter=interpreter):
+    for path in VendorImporter.expose(dists, root=isolated().chroot_path):
         yield path
 
 

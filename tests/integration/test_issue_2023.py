@@ -1,4 +1,4 @@
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -11,10 +11,8 @@ import pytest
 from colors import colors
 
 from pex.layout import Layout
-from pex.pep_427 import InstallableType
 from pex.typing import TYPE_CHECKING
 from testing import run_pex_command
-from testing.pep_427 import get_installable_type_flag
 
 if TYPE_CHECKING:
     from typing import Any, List
@@ -22,13 +20,6 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize(
     "layout", [pytest.param(layout, id=layout.value) for layout in Layout.values()]
-)
-@pytest.mark.parametrize(
-    "installable_type",
-    [
-        pytest.param(installable_type, id=installable_type.value)
-        for installable_type in InstallableType.values()
-    ],
 )
 @pytest.mark.parametrize(
     "execution_mode_args",
@@ -41,7 +32,6 @@ if TYPE_CHECKING:
 def test_unpack_robustness(
     tmpdir,  # type: Any
     layout,  # type: Layout.Value
-    installable_type,  # type: InstallableType.Value
     execution_mode_args,  # type: List[str]
 ):
     # type: (...) -> None
@@ -68,7 +58,6 @@ def test_unpack_robustness(
             exe,
             "--layout",
             layout.value,
-            get_installable_type_flag(installable_type),
             "-o",
             pex,
         ]

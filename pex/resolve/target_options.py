@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -9,6 +9,7 @@ import sys
 from argparse import ArgumentTypeError, Namespace, _ActionsContainer
 
 from pex.argparse import HandleBoolAction
+from pex.interpreter import PythonInterpreter
 from pex.interpreter_constraints import InterpreterConstraints
 from pex.orderedset import OrderedSet
 from pex.pep_425 import CompatibilityTags
@@ -60,12 +61,16 @@ def register(
         ),
     )
 
-    single_interpreter_info_cmd = (
-        "pex3 interpreter inspect --python {current_interpreter} --verbose --indent 4".format(
-            current_interpreter=sys.executable
+    current_interpreter = PythonInterpreter.get()
+    program = sys.argv[0]
+    singe_interpreter_info_cmd = (
+        "PEX_TOOLS=1 {current_interpreter} {program} interpreter --verbose --indent 4".format(
+            current_interpreter=current_interpreter.binary, program=program
         )
     )
-    all_interpreters_info_cmd = "pex3 interpreter inspect --all --verbose --indent 4"
+    all_interpreters_info_cmd = (
+        "PEX_TOOLS=1 {program} interpreter --all --verbose --indent 4".format(program=program)
+    )
 
     parser.add_argument(
         "--interpreter-constraint",
@@ -78,23 +83,26 @@ def register(
             'e.g. "CPython>=2.7,<3" (A CPython interpreter with version >=2.7 AND version <3), '
             '">=2.7,<3" (Any Python interpreter with version >=2.7 AND version <3) or "PyPy" (A '
             "PyPy interpreter of any version). This argument may be repeated multiple times to OR "
-            "the constraints. Try `{single_interpreter_info_cmd}` to find the exact interpreter "
+            "the constraints. Try `{singe_interpreter_info_cmd}` to find the exact interpreter "
             "constraints of {current_interpreter} and `{all_interpreters_info_cmd}` to find out "
             "the interpreter constraints of all Python interpreters on the $PATH.".format(
-                current_interpreter=sys.executable,
-                single_interpreter_info_cmd=single_interpreter_info_cmd,
+                current_interpreter=current_interpreter.binary,
+                singe_interpreter_info_cmd=singe_interpreter_info_cmd,
                 all_interpreters_info_cmd=all_interpreters_info_cmd,
             )
         ),
     )
 
     if include_platforms:
-        _register_platform_options(parser, single_interpreter_info_cmd, all_interpreters_info_cmd)
+        _register_platform_options(
+            parser, current_interpreter, singe_interpreter_info_cmd, all_interpreters_info_cmd
+        )
 
 
 def _register_platform_options(
     parser,  # type: _ActionsContainer
-    single_interpreter_info_cmd,  # type: str
+    current_interpreter,  # type: PythonInterpreter
+    singe_interpreter_info_cmd,  # type: str
     all_interpreters_info_cmd,  # type: str
 ):
     # type: (...) -> None
@@ -112,12 +120,14 @@ def _register_platform_options(
             "string composed of fields: <platform>-<python impl abbr>-<python version>-<abi>. "
             "These fields stem from wheel name conventions as outlined in "
             "https://www.python.org/dev/peps/pep-0427#file-name-convention and influenced by "
-            "https://www.python.org/dev/peps/pep-0425. To find out more, try "
-            "`{all_interpreters_info_cmd}` to print out the platform for all interpreters on the "
-            "$PATH or `{single_interpreter_info_cmd}` to inspect the single interpreter "
-            "{current_interpreter}.".format(
-                current_interpreter=sys.executable,
-                single_interpreter_info_cmd=single_interpreter_info_cmd,
+            "https://www.python.org/dev/peps/pep-0425. For the current interpreter at "
+            "{current_interpreter} the full platform string is {current_platform}. To find out "
+            "more, try `{all_interpreters_info_cmd}` to print out the platform for all "
+            "interpreters on the $PATH or `{singe_interpreter_info_cmd}` to inspect the single "
+            "interpreter {current_interpreter}.".format(
+                current_interpreter=current_interpreter.binary,
+                current_platform=current_interpreter.platform,
+                singe_interpreter_info_cmd=singe_interpreter_info_cmd,
                 all_interpreters_info_cmd=all_interpreters_info_cmd,
             )
         ),

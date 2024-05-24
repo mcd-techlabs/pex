@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 # This file contains several 2.x/3.x compatibility checkstyle violations for a reason
@@ -9,7 +9,6 @@ from __future__ import absolute_import
 import os
 import re
 import sys
-import threading
 from abc import ABCMeta
 from sys import version_info as sys_version_info
 
@@ -120,7 +119,7 @@ else:
 
 
 if PY3:
-    from urllib import parse as _url_parse
+    from urllib import parse as urlparse
     from urllib.error import HTTPError as HTTPError
     from urllib.parse import quote as _url_quote
     from urllib.parse import unquote as _url_unquote
@@ -136,7 +135,7 @@ else:
     from urllib import quote as _url_quote
     from urllib import unquote as _url_unquote
 
-    import urlparse as _url_parse
+    import urlparse as urlparse
     from urllib2 import FileHandler as FileHandler
     from urllib2 import HTTPBasicAuthHandler as HTTPBasicAuthHandler
     from urllib2 import HTTPDigestAuthHandler as HTTPDigestAuthHandler
@@ -147,10 +146,8 @@ else:
     from urllib2 import Request as Request
     from urllib2 import build_opener as build_opener
 
-urlparse = _url_parse
 url_unquote = _url_unquote
 url_quote = _url_quote
-del _url_parse, _url_unquote, _url_quote
 
 if PY3:
     from queue import Queue as Queue
@@ -163,8 +160,7 @@ if PY3:
         def cpu_count():
             # type: () -> Optional[int]
             # The set of CPUs accessible to the current process (pid 0).
-            # N.B.: MyPy does not track the hasattr guard above under interpreters without the attr.
-            cpu_set = os.sched_getaffinity(0)  # type: ignore[attr-defined]
+            cpu_set = os.sched_getaffinity(0)
             return len(cpu_set)
 
 else:
@@ -276,22 +272,3 @@ else:
     from pipes import quote as _shlex_quote
 
 shlex_quote = _shlex_quote
-
-
-if PY3:
-
-    def in_main_thread():
-        # type: () -> bool
-        return threading.current_thread() == threading.main_thread()
-
-else:
-
-    def in_main_thread():
-        # type: () -> bool
-
-        # Both CPython 2.7 and PyPy 2.7 do, in fact, have a threading._MainThread type that the
-        # main thread derives from.
-        return isinstance(
-            threading.current_thread(),
-            threading._MainThread,  # type: ignore[attr-defined]
-        )

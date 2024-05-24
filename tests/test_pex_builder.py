@@ -1,4 +1,4 @@
-# Copyright 2014 Pex project contributors.
+# Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import filecmp
@@ -31,7 +31,7 @@ except ImportError:
     import mock  # type: ignore[no-redef,import]
 
 if TYPE_CHECKING:
-    from typing import Any, Iterator, List, Set, Text
+    from typing import Any, Iterator, List, Set
 
 exe_main = """
 import sys
@@ -210,6 +210,43 @@ def test_pex_builder_deterministic_timestamp():
             assert all(zinfo.date_time == (1980, 1, 1, 0, 0, 0) for zinfo in zf.infolist())
 
 
+def test_pex_builder_from_requirements_pex():
+    # type: () -> None
+    def build_from_req_pex(path, req_pex):
+        # type: (str, str) -> PEXBuilder
+        pb = PEXBuilder(path=path)
+        pb.add_from_requirements_pex(req_pex)
+        with open(os.path.join(path, "exe.py"), "w") as fp:
+            fp.write(exe_main)
+        pb.set_executable(os.path.join(path, "exe.py"))
+        pb.freeze()
+        return pb
+
+    def verify(pb):
+        # type: (PEXBuilder) -> None
+        success_txt = os.path.join(pb.path(), "success.txt")
+        PEX(pb.path(), interpreter=pb.interpreter).run(args=[success_txt])
+        assert os.path.exists(success_txt)
+        with open(success_txt) as fp:
+            assert fp.read() == "success"
+
+    # Build from pex dir.
+    with temporary_dir() as td2:
+        with temporary_dir() as td1, make_bdist("p1") as p1:
+            pb1 = write_pex(td1, dists=[p1])
+            pb2 = build_from_req_pex(td2, pb1.path())
+        verify(pb2)
+
+    # Build from .pex file.
+    with temporary_dir() as td4:
+        with temporary_dir() as td3, make_bdist("p1") as p1:
+            pb3 = write_pex(td3, dists=[p1])
+            target = os.path.join(td3, "foo.pex")
+            pb3.build(target)
+            pb4 = build_from_req_pex(td4, target)
+        verify(pb4)
+
+
 def test_pex_builder_script_from_pex_path(tmpdir):
     # type: (Any) -> None
 
@@ -318,7 +355,7 @@ def test_pex_builder_exclude_bootstrap_testing(
     pb.build(pex_path, layout=layout)
 
     bootstrap_location = os.path.join(pex_path, pb.info.bootstrap)
-    bootstrap_files = set()  # type: Set[Text]
+    bootstrap_files = set()  # type: Set[str]
     if Layout.ZIPAPP == layout:
         with open_zip(pex_path) as zf:
             bootstrap_files.update(
@@ -491,13 +528,6 @@ def test_build_compression(
 
 
 @pytest.mark.skipif(
-    sys.version_info == (3, 13, 0, "alpha", 6),
-    reason=(
-        "The 3.13.0a6 release has a bug in its zipimporter ZIP64 handling, see: "
-        "https://github.com/python/cpython/issues/118107"
-    ),
-)
-@pytest.mark.skipif(
     subprocess.call(args=["cat", os.devnull]) != 0,
     reason="The cat binary is required for this test.",
 )
@@ -513,23 +543,16 @@ def test_check(tmpdir):
         assert Check.ERROR.perform_check(Layout.PACKED, zipapp) is None
         assert Check.ERROR.perform_check(Layout.LOOSE, zipapp) is None
 
-        # Python 3.13 newly supports ZIP64 in `zipimport.zipimporter`.
-        if sys.version_info >= (3, 13):
-            assert Check.WARN.perform_check(Layout.ZIPAPP, zipapp) is True
-            assert Check.ERROR.perform_check(Layout.ZIPAPP, zipapp) is True
-            if test_run:
-                subprocess.check_call(args=[sys.executable, zipapp])
-        else:
-            expected_error_message_re = r"The PEX zip at {path} is not a valid zipapp: ".format(
-                path=re.escape(zipapp)
-            )
-            with pytest.warns(PEXWarning, match=expected_error_message_re):
-                assert Check.WARN.perform_check(Layout.ZIPAPP, zipapp) is False
-            with pytest.raises(InvalidZipAppError, match=expected_error_message_re):
-                Check.ERROR.perform_check(Layout.ZIPAPP, zipapp)
+        expected_error_message_re = r"The PEX zip at {path} is not a valid zipapp: ".format(
+            path=re.escape(zipapp)
+        )
+        with pytest.warns(PEXWarning, match=expected_error_message_re):
+            assert Check.WARN.perform_check(Layout.ZIPAPP, zipapp) is False
+        with pytest.raises(InvalidZipAppError, match=expected_error_message_re):
+            Check.ERROR.perform_check(Layout.ZIPAPP, zipapp)
 
-            if test_run:
-                assert subprocess.call(args=[sys.executable, zipapp]) != 0
+        if test_run:
+            assert subprocess.call(args=[sys.executable, zipapp]) != 0
 
     @contextmanager
     def write_zipapp(path):

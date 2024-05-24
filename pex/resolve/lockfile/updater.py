@@ -1,21 +1,19 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
 
-import itertools
 import logging
 import os
 from collections import OrderedDict
 from contextlib import contextmanager
 
 from pex.common import pluralize
-from pex.dist_metadata import Constraint, Requirement
+from pex.dist_metadata import Requirement
 from pex.network_configuration import NetworkConfiguration
 from pex.orderedset import OrderedSet
 from pex.pep_440 import Version
 from pex.pep_503 import ProjectName
-from pex.requirements import PyPIRequirement, URLRequirement, VCSRequirement
 from pex.resolve.locked_resolve import (
     Artifact,
     FileArtifact,
@@ -26,42 +24,24 @@ from pex.resolve.locked_resolve import (
 from pex.resolve.lockfile.create import create
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.requirement_configuration import RequirementConfiguration
-from pex.resolve.resolved_requirement import ArtifactURL, Fingerprint
+from pex.resolve.resolved_requirement import Fingerprint
 from pex.resolve.resolver_configuration import PipConfiguration, ReposConfiguration
 from pex.result import Error, ResultError, catch, try_
 from pex.sorted_tuple import SortedTuple
-from pex.targets import Target, Targets
+from pex.targets import AbbreviatedPlatform, LocalInterpreter, Target, Targets
 from pex.third_party.packaging import tags
 from pex.typing import TYPE_CHECKING
 from pex.util import named_temporary_file
 
 if TYPE_CHECKING:
-    from typing import (
-        Any,
-        Container,
-        Dict,
-        Iterable,
-        Iterator,
-        List,
-        Mapping,
-        Optional,
-        Tuple,
-        Union,
-    )
+    from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
 
     import attr  # vendor:skip
-
-    from pex.requirements import ParsedRequirement
 else:
     from pex.third_party import attr
 
 
 logger = logging.getLogger(__name__)
-
-
-@attr.s(frozen=True)
-class DeleteUpdate(object):
-    version = attr.ib()  # type: Version
 
 
 @attr.s(frozen=True)
@@ -72,14 +52,12 @@ class VersionUpdate(object):
 
 @attr.s(frozen=True)
 class URLUpdate(object):
-    original = attr.ib()  # type: ArtifactURL
-    updated = attr.ib()  # type: ArtifactURL
+    original = attr.ib()  # type: str
+    updated = attr.ib()  # type: str
 
     def render_update(self):
         # type: () -> str
-        return "{original} -> {updated}".format(
-            original=self.original.download_url, updated=self.updated.download_url
-        )
+        return "{original} -> {updated}".format(original=self.original, updated=self.updated)
 
 
 @attr.s(frozen=True)
@@ -107,10 +85,10 @@ class ArtifactUpdate(object):
     def render_update(self):
         # type: () -> str
         return "{o_url}#{o_alg}:{o_hash} -> {u_url}#{u_alg}:{u_hash}".format(
-            o_url=self.original.url.download_url,
+            o_url=self.original.url,
             o_alg=self.original.fingerprint.algorithm,
             o_hash=self.original.fingerprint.hash,
-            u_url=self.updated.url.download_url,
+            u_url=self.updated.url,
             u_alg=self.updated.fingerprint.algorithm,
             u_hash=self.updated.fingerprint.hash,
         )
@@ -129,11 +107,7 @@ class ArtifactsUpdate(object):
 
         def key(artifact):
             # type: (Artifact) -> str
-            return (
-                artifact.filename
-                if isinstance(artifact, FileArtifact)
-                else artifact.url.normalized_url
-            )
+            return artifact.filename if isinstance(artifact, FileArtifact) else artifact.url
 
         def calculate_updates(
             original_art,  # type: Artifact
@@ -191,9 +165,9 @@ class ArtifactsUpdate(object):
 @attr.s(frozen=True)
 class ResolveUpdate(object):
     updated_resolve = attr.ib()  # type: LockedResolve
-    updates = attr.ib(
-        factory=dict
-    )  # type: Mapping[ProjectName, Optional[Union[DeleteUpdate, VersionUpdate, ArtifactsUpdate]]]
+    updates = (
+        attr.ib()
+    )  # type: Mapping[ProjectName, Optional[Union[VersionUpdate, ArtifactsUpdate]]]
 
 
 @attr.s(frozen=True)
@@ -216,148 +190,58 @@ class ResolveUpdater(object):
     """
 
     @classmethod
-    def derived(
+    def create(
         cls,
-        requirement_configuration,  # type: RequirementConfiguration
-        parsed_requirements,  # type: Iterable[ParsedRequirement]
-        lock_file,  # type: Lockfile
-        lock_configuration,  # type: LockConfiguration
-        pip_configuration,  # type: PipConfiguration
-    ):
-        # type: (...) -> Union[ResolveUpdater, Error]
-
-        original_requirements_by_project_name = OrderedDict(
-            (requirement.project_name, requirement) for requirement in lock_file.requirements
-        )  # type: OrderedDict[ProjectName, Requirement]
-
-        replace_requirements = []  # type: List[Requirement]
-        for parsed_requirement in parsed_requirements:
-            if isinstance(parsed_requirement, (PyPIRequirement, URLRequirement, VCSRequirement)):
-                requirement = parsed_requirement.requirement
-                original_requirement = original_requirements_by_project_name.pop(
-                    requirement.project_name, None
-                )
-                if requirement != original_requirement:
-                    replace_requirements.append(requirement)
-            else:
-                return Error(
-                    "Cannot update a bare local project directory requirement on {path}.\n"
-                    "Try re-phrasing as a PEP-508 direct reference with a file:// URL.\n"
-                    "See: https://peps.python.org/pep-0508/".format(path=parsed_requirement.path)
-                )
-
-        deletes = tuple(original_requirements_by_project_name) if parsed_requirements else ()
-
-        original_constraints_by_project_name = OrderedDict(
-            (constraint.project_name, constraint) for constraint in lock_file.constraints
-        )  # type: OrderedDict[ProjectName, Constraint]
-
-        update_constraints_by_project_name = (
-            OrderedDict()
-        )  # type: OrderedDict[ProjectName, Constraint]
-        for requirement in replace_requirements:
-            project_name = requirement.project_name
-            original_constraint = original_constraints_by_project_name.get(project_name)
-            if original_constraint:
-                logger.warning(
-                    "Over-riding original constraint {original} with {override}.".format(
-                        original=original_constraint, override=requirement
-                    )
-                )
-            update_constraints_by_project_name[project_name] = requirement.as_constraint()
-
-        original_requirements = OrderedDict(
-            (requirement.project_name, requirement) for requirement in lock_file.requirements
-        )  # type: OrderedDict[ProjectName, Requirement]
-        original_requirements.update(
-            (replacement.project_name, replacement) for replacement in replace_requirements
-        )
-        return cls(
-            requirement_configuration=requirement_configuration,
-            original_requirements=tuple(original_requirements.values()),
-            update_constraints_by_project_name=update_constraints_by_project_name,
-            deletes=frozenset(deletes),
-            lock_configuration=lock_configuration,
-            pip_configuration=pip_configuration,
-        )
-
-    @classmethod
-    def specified(
-        cls,
+        requirements,  # type: Iterable[Requirement]
+        constraints,  # type: Iterable[Requirement]
         updates,  # type: Iterable[Requirement]
-        replacements,  # type: Iterable[Requirement]
-        deletes,  # type: Iterable[ProjectName]
-        lock_file,  # type: Lockfile
         lock_configuration,  # type: LockConfiguration
         pip_configuration,  # type: PipConfiguration
     ):
-        # type: (...) -> ResolveUpdater
+        original_requirements = tuple(str(requirement) for requirement in requirements)
 
-        original_requirements_by_project_name = OrderedDict(
-            (requirement.project_name, requirement) for requirement in lock_file.requirements
-        )  # type: OrderedDict[ProjectName, Requirement]
-        original_requirements_by_project_name.update(
-            (replacement.project_name, replacement) for replacement in replacements
-        )
-
-        original_constraints_by_project_name = OrderedDict(
-            (constraint.project_name, constraint) for constraint in lock_file.constraints
-        )  # type: OrderedDict[ProjectName, Constraint]
+        original_constraints = {
+            constraint.project_name: constraint for constraint in constraints
+        }  # type: Mapping[ProjectName, Requirement]
 
         update_constraints_by_project_name = (
             OrderedDict()
-        )  # type: OrderedDict[ProjectName, Constraint]
-        for change in itertools.chain(updates, replacements):
-            project_name = change.project_name
-            original_constraint = original_constraints_by_project_name.get(project_name)
+        )  # type: OrderedDict[ProjectName, Requirement]
+        for update in updates:
+            project_name = update.project_name
+            original_constraint = original_constraints.get(project_name)
             if original_constraint:
                 logger.warning(
                     "Over-riding original constraint {original} with {override}.".format(
-                        original=original_constraint, override=change
+                        original=original_constraint, override=update
                     )
                 )
-            update_constraints_by_project_name[project_name] = change.as_constraint()
+            update_constraints_by_project_name[project_name] = update
 
         return cls(
-            requirement_configuration=RequirementConfiguration(
-                requirements=[str(req) for req in original_requirements_by_project_name.values()],
-            ),
-            original_requirements=tuple(original_requirements_by_project_name.values()),
-            update_requirements_by_project_name={update.project_name: update for update in updates},
             update_constraints_by_project_name=update_constraints_by_project_name,
-            deletes=frozenset(deletes),
             lock_configuration=lock_configuration,
+            original_requirements=original_requirements,
             pip_configuration=pip_configuration,
         )
 
-    requirement_configuration = attr.ib()  # type: RequirementConfiguration
-    original_requirements = attr.ib()  # type: Iterable[Requirement]
-    update_constraints_by_project_name = attr.ib()  # type: Mapping[ProjectName, Constraint]
-    deletes = attr.ib()  # type: Container[ProjectName]
+    original_requirements = attr.ib()  # type: Iterable[str]
+    update_constraints_by_project_name = attr.ib()  # type: Mapping[ProjectName, Requirement]
     lock_configuration = attr.ib()  # type: LockConfiguration
     pip_configuration = attr.ib()  # type: PipConfiguration
-    update_requirements_by_project_name = attr.ib(
-        factory=dict
-    )  # type: Mapping[ProjectName, Requirement]
-
-    def iter_updated_requirements(self):
-        # type: () -> Iterator[Requirement]
-        for requirement in self.original_requirements:
-            if requirement.project_name not in self.deletes:
-                yield requirement
 
     @contextmanager
     def _calculate_requirement_configuration(
         self,
         locked_resolve,  # type: LockedResolve
-        artifacts_can_change=False,  # type: bool
+        pin_all=False,  # type: bool
     ):
-        # type: (...) -> Iterator[Optional[RequirementConfiguration]]
-        if not self.update_constraints_by_project_name and not artifacts_can_change:
-            yield None
+        # type: (...) -> Iterator[RequirementConfiguration]
+        if not self.update_constraints_by_project_name and not pin_all:
+            yield RequirementConfiguration(requirements=self.original_requirements)
             return
 
-        requirements = OrderedSet(map(str, self.original_requirements))
+        requirements = OrderedSet(self.original_requirements)
         constraints = []
         update_constraints_by_project_name = OrderedDict(self.update_constraints_by_project_name)
         for locked_requirement in locked_resolve.locked_requirements:
@@ -371,95 +255,54 @@ class ResolveUpdater(object):
         requirements.update(str(req) for req in update_constraints_by_project_name.values())
 
         if not constraints:
-            yield attr.evolve(self.requirement_configuration, requirements=requirements)
+            yield RequirementConfiguration(requirements=requirements)
             return
 
         with named_temporary_file(prefix="lock_update.", suffix=".constraints.txt", mode="w") as fp:
             fp.write(os.linesep.join(constraints))
             fp.flush()
-            constraint_files = [fp.name]
-            if self.requirement_configuration.constraint_files:
-                constraint_files.extend(self.requirement_configuration.constraint_files)
             try:
-                yield attr.evolve(
-                    self.requirement_configuration,
-                    requirements=requirements,
-                    constraint_files=constraint_files,
+                yield RequirementConfiguration(
+                    requirements=requirements, constraint_files=[fp.name]
                 )
             except ResultError as e:
                 logger.error(
-                    "Given the lock requirements:\n"
-                    "{requirements}\n"
-                    "\n"
-                    "The following lock update constraints could not all be satisfied:\n"
-                    "{constraints}\n".format(
-                        requirements="\n".join(requirements), constraints="\n".join(constraints)
-                    )
+                    "The following lock update constraints could not be satisfied:\n"
+                    "{constraints}".format(constraints="\n".join(constraints))
                 )
                 raise e
 
     def update_resolve(
         self,
         locked_resolve,  # type: LockedResolve
-        target,  # type: Target
-        artifacts_can_change=False,  # type: bool
+        targets,  # type: Targets
+        pin_all=False,  # type: bool
     ):
         # type: (...) -> Union[ResolveUpdate, Error]
 
-        updated_resolve = locked_resolve
-        updated_requirements = self.original_requirements
         with self._calculate_requirement_configuration(
-            locked_resolve, artifacts_can_change=artifacts_can_change
+            locked_resolve, pin_all=pin_all
         ) as requirement_configuration:
-            if requirement_configuration:
-                updated_lock_file = try_(
-                    create(
-                        lock_configuration=self.lock_configuration,
-                        requirement_configuration=requirement_configuration,
-                        targets=Targets.from_target(target),
-                        pip_configuration=self.pip_configuration,
-                    )
+            updated_lock_file = try_(
+                create(
+                    lock_configuration=self.lock_configuration,
+                    requirement_configuration=requirement_configuration,
+                    targets=targets,
+                    pip_configuration=self.pip_configuration,
                 )
-                assert 1 == len(updated_lock_file.locked_resolves)
-                updated_resolve = updated_lock_file.locked_resolves[0]
-                updated_requirements = updated_lock_file.requirements
+            )
 
-        updates = (
-            OrderedDict()
-        )  # type: OrderedDict[ProjectName, Optional[Union[DeleteUpdate, VersionUpdate, ArtifactsUpdate]]]
-
-        if self.deletes:
-            reduced_requirements = [
-                requirement
-                for requirement in updated_requirements
-                if requirement.project_name not in self.deletes
-            ]
-            resolve = try_(
-                updated_resolve.resolve(target=target, requirements=reduced_requirements)
-            )
-            included_projects = frozenset(
-                artifact.pin.project_name for artifact in resolve.downloadable_artifacts
-            )
-            updates.update(
-                (locked_requirement.pin.project_name, DeleteUpdate(locked_requirement.pin.version))
-                for locked_requirement in updated_resolve.locked_requirements
-                if locked_requirement.pin.project_name not in included_projects
-            )
-            updated_resolve = attr.evolve(
-                updated_resolve,
-                locked_requirements=SortedTuple(
-                    [
-                        locked_requirement
-                        for locked_requirement in updated_resolve.locked_requirements
-                        if locked_requirement.pin.project_name in included_projects
-                    ]
-                ),
-            )
+        assert 1 == len(updated_lock_file.locked_resolves)
+        updated_resolve = updated_lock_file.locked_resolves[0]
 
         updated_requirements_by_project_name = OrderedDict(
             (updated_requirement.pin.project_name, updated_requirement)
             for updated_requirement in updated_resolve.locked_requirements
         )  # type: OrderedDict[ProjectName, LockedRequirement]
+
+        updates = (
+            OrderedDict()
+        )  # type: OrderedDict[ProjectName, Optional[Union[VersionUpdate, ArtifactsUpdate]]]
         for locked_requirement in locked_resolve.locked_requirements:
             original_pin = locked_requirement.pin
             project_name = original_pin.project_name
@@ -469,81 +312,21 @@ class ResolveUpdater(object):
             updated_pin = updated_requirement.pin
             original_artifacts = tuple(locked_requirement.iter_artifacts())
             updated_artifacts = tuple(updated_requirement.iter_artifacts())
-
-            # N.B.: We use a custom key for artifact equality comparison since `Artifact`
-            # contains a `verified` attribute that can both vary based on Pex's current
-            # knowledge about the trustworthiness of an artifact hash and is not relevant to
-            # whether the artifact refers to the same artifact.
-            def artifact_key(artifact):
-                # type: (Artifact) -> Any
-                return artifact.url, artifact.fingerprint
-
-            def artifacts_differ():
-                # type: () -> bool
-                return tuple(map(artifact_key, original_artifacts)) != tuple(
-                    map(artifact_key, updated_artifacts)
-                )
-
             if (
                 self.update_constraints_by_project_name
                 and project_name not in self.update_constraints_by_project_name
             ):
-                assert updated_pin == original_pin, (
-                    "The locked requirement {original} should have been undisturbed by the lock "
-                    "update, but it changed to {updated}.".format(
-                        original=original_pin.as_requirement(), updated=updated_pin.as_requirement()
-                    )
-                )
-
-                if artifacts_can_change and artifacts_differ():
-                    updates[project_name] = ArtifactsUpdate.calculate(
-                        version=original_pin.version,
-                        original=original_artifacts,
-                        updated=updated_artifacts,
-                    )
-                    continue
-
-                assert artifact_key(updated_requirement.artifact) == artifact_key(
-                    locked_requirement.artifact
-                ), (
-                    "The locked requirement {original} should have been undisturbed by the lock "
-                    "update, but its primary artifact changed from:\n"
-                    "{original_artifact}\n"
-                    "to:\n"
-                    "{updated_artifact}".format(
-                        original=original_pin.as_requirement(),
-                        original_artifact=artifact_key(locked_requirement.artifact),
-                        updated_artifact=artifact_key(updated_requirement.artifact),
-                    )
-                )
-                assert set(map(artifact_key, updated_requirement.additional_artifacts)) == set(
-                    map(artifact_key, locked_requirement.additional_artifacts)
-                ), (
-                    "The locked requirement {original} should have been undisturbed by the lock "
-                    "update, but its additional artifact set changed from:\n"
-                    "{original_artifacts}\n"
-                    "to:\n"
-                    "{updated_artifacts}".format(
-                        original=original_pin.as_requirement(),
-                        original_artifacts="\n".join(
-                            map(
-                                lambda a: str(artifact_key(a)),
-                                locked_requirement.additional_artifacts,
-                            )
-                        ),
-                        updated_artifacts="\n".join(
-                            map(
-                                lambda a: str(artifact_key(a)),
-                                updated_requirement.additional_artifacts,
-                            )
-                        ),
-                    )
+                assert updated_pin == original_pin
+                assert updated_requirement.artifact == locked_requirement.artifact
+                assert (
+                    updated_requirement.additional_artifacts
+                    == locked_requirement.additional_artifacts
                 )
             elif original_pin != updated_pin:
                 updates[project_name] = VersionUpdate(
                     original=original_pin.version, updated=updated_pin.version
                 )
-            elif artifacts_differ():
+            elif original_artifacts != updated_artifacts:
                 updates[project_name] = ArtifactsUpdate.calculate(
                     version=original_pin.version,
                     original=original_artifacts,
@@ -572,14 +355,22 @@ class ResolveUpdateRequest(object):
     target = attr.ib()  # type: Target
     locked_resolve = attr.ib()  # type: LockedResolve
 
+    def targets(self, assume_manylinux=None):
+        # type: (Optional[str]) -> Targets
+        return Targets(
+            interpreters=(self.target.interpreter,)
+            if isinstance(self.target, LocalInterpreter)
+            else (),
+            platforms=(self.target.platform,)
+            if isinstance(self.target, AbbreviatedPlatform)
+            else (),
+            assume_manylinux=assume_manylinux,
+        )
+
 
 @attr.s(frozen=True)
 class LockUpdate(object):
-    requirements = attr.ib()  # type: Iterable[Requirement]
     resolves = attr.ib()  # type: Iterable[ResolveUpdate]
-    update_requirements_by_project_name = attr.ib(
-        factory=dict
-    )  # type: Mapping[ProjectName, Requirement]
 
 
 @attr.s(frozen=True)
@@ -604,7 +395,11 @@ class LockUpdater(object):
             version=lock_file.pip_version,
             resolver_version=lock_file.resolver_version,
             allow_prereleases=lock_file.allow_prereleases,
-            build_configuration=lock_file.build_configuration(),
+            allow_wheels=lock_file.allow_wheels,
+            allow_builds=lock_file.allow_builds,
+            prefer_older_binary=lock_file.prefer_older_binary,
+            use_pep517=lock_file.use_pep517,
+            build_isolation=lock_file.build_isolation,
             transitive=lock_file.transitive,
             repos_configuration=repos_configuration,
             network_configuration=network_configuration,
@@ -621,73 +416,22 @@ class LockUpdater(object):
     lock_configuration = attr.ib()  # type: LockConfiguration
     pip_configuration = attr.ib()  # type: PipConfiguration
 
-    def sync(
-        self,
-        update_requests,  # type: Iterable[ResolveUpdateRequest]
-        requirement_configuration,  # type: RequirementConfiguration
-    ):
-        # type: (...) -> Union[LockUpdate, Error]
-
-        requirements = tuple(
-            requirement_configuration.parse_requirements(
-                self.pip_configuration.network_configuration
-            )
-        )
-        resolve_updater = try_(
-            ResolveUpdater.derived(
-                requirement_configuration=requirement_configuration,
-                parsed_requirements=requirements,
-                lock_file=self.lock_file,
-                lock_configuration=self.lock_configuration,
-                pip_configuration=self.pip_configuration,
-            )
-        )
-        return self._perform_update(
-            update_requests=update_requests,
-            resolve_updater=resolve_updater,
-            artifacts_can_change=True,
-        )
-
     def update(
         self,
         update_requests,  # type: Iterable[ResolveUpdateRequest]
-        updates=(),  # type: Iterable[Requirement]
-        replacements=(),  # type: Iterable[Requirement]
-        deletes=(),  # type: Iterable[ProjectName]
-        artifacts_can_change=False,  # type: bool
+        updates,  # type: Iterable[Requirement]
+        pin=False,  # type: bool
+        assume_manylinux=None,  # type: Optional[str]
     ):
         # type: (...) -> Union[LockUpdate, Error]
 
-        if not any((artifacts_can_change, updates, replacements, deletes)):
-            return LockUpdate(
-                requirements=self.lock_file.requirements,
-                resolves=tuple(
-                    ResolveUpdate(updated_resolve=update_request.locked_resolve)
-                    for update_request in update_requests
-                ),
-            )
-
-        resolve_updater = ResolveUpdater.specified(
+        resolve_updater = ResolveUpdater.create(
+            requirements=self.lock_file.requirements,
+            constraints=self.lock_file.constraints,
             updates=updates,
-            replacements=replacements,
-            deletes=deletes,
-            lock_file=self.lock_file,
             lock_configuration=self.lock_configuration,
             pip_configuration=self.pip_configuration,
         )
-        return self._perform_update(
-            update_requests=update_requests,
-            resolve_updater=resolve_updater,
-            artifacts_can_change=artifacts_can_change,
-        )
-
-    def _perform_update(
-        self,
-        update_requests,  # type: Iterable[ResolveUpdateRequest]
-        resolve_updater,  # type: ResolveUpdater
-        artifacts_can_change=False,  # type: bool
-    ):
-        # type: (...) -> Union[LockUpdate, Error]
 
         error_by_target = OrderedDict()  # type: OrderedDict[Target, Error]
         locked_resolve_by_platform_tag = OrderedDict(
@@ -696,7 +440,7 @@ class LockUpdater(object):
         )  # type: OrderedDict[Optional[tags.Tag], LockedResolve]
         resolve_updates_by_platform_tag = (
             {}
-        )  # type: Dict[Optional[tags.Tag], Mapping[ProjectName, Optional[Union[DeleteUpdate, VersionUpdate, ArtifactsUpdate]]]]
+        )  # type: Dict[Optional[tags.Tag], Mapping[ProjectName, Optional[VersionUpdate]]]
 
         # TODO(John Sirois): Consider parallelizing this. The underlying Jobs are down a few layers;
         #  so this will likely require using multiprocessing.
@@ -704,8 +448,8 @@ class LockUpdater(object):
             result = catch(
                 resolve_updater.update_resolve,
                 locked_resolve=update_request.locked_resolve,
-                target=update_request.target,
-                artifacts_can_change=artifacts_can_change,
+                targets=update_request.targets(assume_manylinux=assume_manylinux),
+                pin_all=pin,
             )
             if isinstance(result, Error):
                 error_by_target[update_request.target] = result
@@ -730,13 +474,11 @@ class LockUpdater(object):
             )
 
         return LockUpdate(
-            requirements=tuple(resolve_updater.iter_updated_requirements()),
-            update_requirements_by_project_name=resolve_updater.update_requirements_by_project_name,
             resolves=tuple(
                 ResolveUpdate(
                     updated_resolve=updated_resolve,
                     updates=resolve_updates_by_platform_tag.get(platform_tag, {}),
                 )
                 for platform_tag, updated_resolve in locked_resolve_by_platform_tag.items()
-            ),
+            )
         )

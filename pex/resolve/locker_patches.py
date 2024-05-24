@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -93,9 +93,7 @@ def patch_wheel_model():
         def supported_version(self, *_args, **_kwargs):
             if not hasattr(self, "_versions"):
                 versions = set()
-                abis = list(self.abis)
-                is_abi3 = ["abi3"] == abis
-                is_abi_none = ["none"] == abis
+                is_abi3 = ["abi3"] == list(self.abis)
                 for pyversion in self.pyversions:
                     # For the format, see: https://peps.python.org/pep-0425/#python-tag
                     match = re.search(r"^(?P<impl>\D{2,})(?P<major>\d)(?P<minor>\d+)?", pyversion)
@@ -108,7 +106,7 @@ def patch_wheel_model():
 
                     major = int(match.group("major"))
                     minor = match.group("minor")
-                    if is_abi_none or (is_abi3 and major == 3):
+                    if is_abi3 and major == 3:
                         versions.add(major)
                     elif minor:
                         versions.add((major, int(minor)))

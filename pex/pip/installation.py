@@ -1,9 +1,10 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
 
 import os
+import sys
 from textwrap import dedent
 
 from pex import pex_warnings, third_party
@@ -74,7 +75,7 @@ def _pip_installation(
     pip_cache = os.path.join(pip_root, "pip_cache")
     pip_pex = ensure_venv(PEX(pip_pex_path, interpreter=pip_interpreter))
     pip_venv = PipVenv(venv_dir=pip_pex.venv_dir, execute_args=tuple(pip_pex.execute_args()))
-    return Pip(pip=pip_venv, version=version, pip_cache=pip_cache)
+    return Pip(pip=pip_venv, pip_cache=pip_cache)
 
 
 def _vendored_installation(interpreter=None):
@@ -82,9 +83,7 @@ def _vendored_installation(interpreter=None):
 
     return _pip_installation(
         version=PipVersion.VENDORED,
-        iter_distribution_locations=lambda: third_party.expose(
-            ("pip", "setuptools"), interpreter=interpreter
-        ),
+        iter_distribution_locations=lambda: third_party.expose(("pip", "setuptools", "wheel")),
         interpreter=interpreter,
     )
 
@@ -142,12 +141,12 @@ def _resolved_installation(
         )
 
     def resolve_distribution_locations():
-        for resolved_distribution in resolver.resolve_requirements(
+        for installed_distribution in resolver.resolve_requirements(
             requirements=version.requirements,
             targets=targets,
             pip_version=PipVersion.VENDORED,
-        ).distributions:
-            yield resolved_distribution.distribution.location
+        ).installed_distributions:
+            yield installed_distribution.distribution.location
 
     return _pip_installation(
         version=version,

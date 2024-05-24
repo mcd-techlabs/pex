@@ -1,6 +1,7 @@
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 import os.path
+import shutil
 import subprocess
 import sys
 

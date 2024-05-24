@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -16,26 +16,24 @@ from pex.common import pluralize
 from pex.compatibility import cpu_count
 from pex.network_configuration import NetworkConfiguration
 from pex.orderedset import OrderedSet
-from pex.pep_427 import InstallableType
 from pex.pep_503 import ProjectName
 from pex.pip.local_project import digest_local_project
 from pex.pip.tool import PackageIndexConfiguration
 from pex.pip.vcs import digest_vcs_archive
-from pex.pip.version import PipVersionValue
+from pex.pip.version import PipVersion, PipVersionValue
 from pex.resolve.downloads import ArtifactDownloader
 from pex.resolve.locked_resolve import (
     DownloadableArtifact,
     FileArtifact,
     LocalProjectArtifact,
-    LockConfiguration,
     VCSArtifact,
 )
 from pex.resolve.lockfile.download_manager import DownloadedArtifact, DownloadManager
 from pex.resolve.lockfile.model import Lockfile
 from pex.resolve.lockfile.subset import subset
 from pex.resolve.requirement_configuration import RequirementConfiguration
-from pex.resolve.resolver_configuration import BuildConfiguration, ResolverVersion
-from pex.resolve.resolvers import MAX_PARALLEL_DOWNLOADS, Resolver, ResolveResult
+from pex.resolve.resolver_configuration import ResolverVersion
+from pex.resolve.resolvers import MAX_PARALLEL_DOWNLOADS, Installed, Resolver
 from pex.resolver import BuildAndInstallRequest, BuildRequest, InstallRequest
 from pex.result import Error, catch, try_
 from pex.targets import Target, Targets
@@ -45,11 +43,7 @@ from pex.typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
-    import attr  # vendor:skip
-
     from pex.hashing import HintedDigest
-else:
-    from pex.third_party import attr
 
 
 class FileArtifactDownloadManager(DownloadManager[FileArtifact]):
@@ -86,7 +80,8 @@ class VCSArtifactDownloadManager(DownloadManager[VCSArtifact]):
         network_configuration=None,  # type: Optional[NetworkConfiguration]
         password_entries=(),  # type: Iterable[PasswordEntry]
         cache=None,  # type: Optional[str]
-        build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+        use_pep517=None,  # type: Optional[bool]
+        build_isolation=True,  # type: bool
         pex_root=None,  # type: Optional[str]
         pip_version=None,  # type: Optional[PipVersionValue]
         resolver=None,  # type: Optional[Resolver]
@@ -102,9 +97,8 @@ class VCSArtifactDownloadManager(DownloadManager[VCSArtifact]):
         self._network_configuration = network_configuration
         self._password_entries = password_entries
         self._cache = cache
-        self._build_configuration = attr.evolve(
-            build_configuration, allow_wheels=False, allow_builds=True, prefer_older_binary=False
-        )
+        self._use_pep517 = use_pep517
+        self._build_isolation = build_isolation
         self._pip_version = pip_version
         self._resolver = resolver
         self._use_pip_config = use_pip_config
@@ -128,7 +122,10 @@ class VCSArtifactDownloadManager(DownloadManager[VCSArtifact]):
             resolver_version=self._resolver_version,
             network_configuration=self._network_configuration,
             password_entries=self._password_entries,
-            build_configuration=self._build_configuration,
+            use_wheel=False,
+            prefer_older_binary=False,
+            use_pep517=self._use_pep517,
+            build_isolation=self._build_isolation,
             max_parallel_jobs=1,
             pip_version=self._pip_version,
             resolver=self._resolver,
@@ -239,16 +236,19 @@ def resolve_from_lock(
     resolver_version=None,  # type: Optional[ResolverVersion.Value]
     network_configuration=None,  # type: Optional[NetworkConfiguration]
     password_entries=(),  # type: Iterable[PasswordEntry]
-    build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+    build=True,  # type: bool
+    use_wheel=True,  # type: bool
+    prefer_older_binary=False,  # type: bool
+    use_pep517=None,  # type: Optional[bool]
+    build_isolation=True,  # type: bool
     compile=False,  # type: bool
     transitive=True,  # type: bool
     verify_wheels=True,  # type: bool
     max_parallel_jobs=None,  # type: Optional[int]
     pip_version=None,  # type: Optional[PipVersionValue]
     use_pip_config=False,  # type: bool
-    result_type=InstallableType.INSTALLED_WHEEL_CHROOT,  # type: InstallableType.Value
 ):
-    # type: (...) -> Union[ResolveResult, Error]
+    # type: (...) -> Union[Installed, Error]
 
     subset_result = try_(
         subset(
@@ -260,7 +260,9 @@ def resolve_from_lock(
                 constraint_files=constraint_files,
             ),
             network_configuration=network_configuration,
-            build_configuration=build_configuration,
+            build=build,
+            use_wheel=use_wheel,
+            prefer_older_binary=prefer_older_binary,
             transitive=transitive,
         )
     )
@@ -282,11 +284,6 @@ def resolve_from_lock(
             file_lock_style=file_lock_style,
             downloader=ArtifactDownloader(
                 resolver=resolver,
-                lock_configuration=LockConfiguration(
-                    style=lock.style,
-                    requires_python=lock.requires_python,
-                    target_systems=lock.target_systems,
-                ),
                 target=resolved_subset.target,
                 package_index_configuration=PackageIndexConfiguration.create(
                     pip_version=pip_version,
@@ -312,7 +309,8 @@ def resolve_from_lock(
             resolver_version=resolver_version,
             network_configuration=network_configuration,
             password_entries=password_entries,
-            build_configuration=build_configuration,
+            use_pep517=use_pep517,
+            build_isolation=build_isolation,
             pip_version=pip_version,
             resolver=resolver,
             use_pip_config=use_pip_config,
@@ -384,7 +382,7 @@ def resolve_from_lock(
                         "{index}. {pin} from {url}\n    {error}".format(
                             index=index,
                             pin=downloadable_artifact.pin,
-                            url=downloadable_artifact.artifact.url.download_url,
+                            url=downloadable_artifact.artifact.url,
                             error=error,
                         )
                         for index, (downloadable_artifact, error) in enumerate(
@@ -435,35 +433,24 @@ def resolve_from_lock(
                 use_pip_config=use_pip_config,
             ),
             compile=compile,
-            build_configuration=build_configuration,
+            prefer_older_binary=prefer_older_binary,
+            use_pep517=use_pep517,
+            build_isolation=build_isolation,
             verify_wheels=verify_wheels,
             pip_version=pip_version,
             resolver=resolver,
         )
-
-        local_project_directory_to_sdist = {
-            downloadable_artifact.artifact.directory: downloaded_artifact.path
-            for downloadable_artifact, downloaded_artifact in downloaded_artifacts.items()
-            if isinstance(downloadable_artifact.artifact, LocalProjectArtifact)
-        }
-
-        # This otherwise checks that resolved distributions all meet internal requirement
-        # constraints (This allows pip-legacy-resolver resolves with invalid solutions to be
-        # failed post-facto by Pex at PEX build time). We've already done this via
-        # `LockedResolve.resolve` above and need not waste time (~O(100ms)) doing this again.
-        ignore_errors = True
-
-        distributions = (
-            build_and_install_request.install_distributions(
-                ignore_errors=ignore_errors,
-                max_parallel_jobs=max_parallel_jobs,
-                local_project_directory_to_sdist=local_project_directory_to_sdist,
-            )
-            if result_type is InstallableType.INSTALLED_WHEEL_CHROOT
-            else build_and_install_request.build_distributions(
-                ignore_errors=ignore_errors,
-                max_parallel_jobs=max_parallel_jobs,
-                local_project_directory_to_sdist=local_project_directory_to_sdist,
-            )
+        installed_distributions = build_and_install_request.install_distributions(
+            # This otherwise checks that resolved distributions all meet internal requirement
+            # constraints (This allows pip-legacy-resolver resolves with invalid solutions to be
+            # failed post-facto by Pex at PEX build time). We've already done this via
+            # `LockedResolve.resolve` above and need not waste time (~O(100ms)) doing this again.
+            ignore_errors=True,
+            max_parallel_jobs=max_parallel_jobs,
+            local_project_directory_to_sdist={
+                downloadable_artifact.artifact.directory: downloaded_artifact.path
+                for downloadable_artifact, downloaded_artifact in downloaded_artifacts.items()
+                if isinstance(downloadable_artifact.artifact, LocalProjectArtifact)
+            },
         )
-    return ResolveResult(distributions=tuple(distributions), type=result_type)
+    return Installed(installed_distributions=tuple(installed_distributions))

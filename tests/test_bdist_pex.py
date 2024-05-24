@@ -1,4 +1,4 @@
-# Copyright 2016 Pex project contributors.
+# Copyright 2016 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -10,9 +10,6 @@ from textwrap import dedent
 import pytest
 
 from pex.common import open_zip, safe_mkdtemp, temporary_dir
-from pex.pep_427 import InstallableType
-from pex.pip.version import PipVersion
-from pex.resolver import resolve
 from pex.typing import TYPE_CHECKING
 from pex.venv.virtualenv import Virtualenv
 from testing import WheelBuilder, make_project, pex_project_dir, temporary_content
@@ -73,7 +70,7 @@ def bdist_pex(project_dir, bdist_args=None):
 
         venv = bdist_pex_venv()
         _, process = venv.interpreter.open_process(args=cmd, cwd=project_dir)
-        assert 0 == process.wait(), "Failed to execute bdist_pex: {}".format(process.returncode)
+        process.wait()
         yield [os.path.join(dist_dir, dir_entry) for dir_entry in os.listdir(dist_dir)]
 
 
@@ -215,17 +212,11 @@ def test_unwriteable_contents():
         },
         perms=UNWRITEABLE_PERMS,
     ) as my_app_project_dir:
-        wheels = [WheelBuilder(my_app_project_dir).bdist()]
-        wheels.extend(
-            fingerprinted_dist.distribution.location
-            for fingerprinted_dist in resolve(
-                requirements=[PipVersion.VENDORED.wheel_requirement],
-                result_type=InstallableType.WHEEL_FILE,
-            ).distributions
-        )
+        my_app_whl = WheelBuilder(my_app_project_dir).bdist()
+
         with make_project(name="uses_my_app", install_reqs=["my_app"]) as uses_my_app_project_dir:
-            pex_args = "--pex-args=--disable-cache --pip-version=vendored --no-pypi {}".format(
-                " ".join("-f {}".format(os.path.dirname(wheel)) for wheel in wheels)
+            pex_args = "--pex-args=--disable-cache --pip-version=vendored --no-pypi -f {}".format(
+                os.path.dirname(my_app_whl)
             )
             with bdist_pex(uses_my_app_project_dir, bdist_args=[pex_args]) as (uses_my_app_pex,):
                 with open_zip(uses_my_app_pex) as zf:

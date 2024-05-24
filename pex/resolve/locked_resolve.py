@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, division
@@ -9,6 +9,7 @@ from collections import OrderedDict, defaultdict, deque
 from functools import total_ordering
 
 from pex.common import pluralize
+from pex.compatibility import urlparse
 from pex.dist_metadata import DistMetadata, Requirement
 from pex.enum import Enum
 from pex.orderedset import OrderedSet
@@ -23,10 +24,9 @@ from pex.resolve.resolved_requirement import (
     Pin,
     ResolvedRequirement,
 )
-from pex.resolve.resolver_configuration import BuildConfiguration
 from pex.result import Error
 from pex.sorted_tuple import SortedTuple
-from pex.targets import Target
+from pex.targets import LocalInterpreter, Target
 from pex.typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -120,7 +120,7 @@ class Artifact(object):
         if "file" == artifact_url.scheme and os.path.isdir(artifact_url.path):
             directory = os.path.normpath(artifact_url.path)
             return LocalProjectArtifact(
-                url=artifact_url,
+                url=artifact_url.normalized_url,
                 fingerprint=fingerprint,
                 verified=verified,
                 directory=directory,
@@ -128,7 +128,7 @@ class Artifact(object):
 
         filename = os.path.basename(artifact_url.path)
         return FileArtifact(
-            url=artifact_url,
+            url=artifact_url.normalized_url,
             fingerprint=fingerprint,
             verified=verified,
             filename=filename,
@@ -146,7 +146,7 @@ class Artifact(object):
             artifact_url=ArtifactURL.parse(url), fingerprint=fingerprint, verified=verified
         )
 
-    url = attr.ib()  # type: ArtifactURL
+    url = attr.ib()  # type: str
     fingerprint = attr.ib()  # type: Fingerprint
     verified = attr.ib()  # type: bool
 
@@ -159,57 +159,12 @@ class Artifact(object):
 
 @attr.s(frozen=True, order=False)
 class FileArtifact(Artifact):
-    @staticmethod
-    def is_zip_sdist(path):
-        # type: (str) -> bool
-
-        # N.B.: Windows sdists traditionally were released in zip format.
-        return path.endswith(".zip")
-
-    @staticmethod
-    def is_tar_sdist(path):
-        # type: (str) -> bool
-
-        # N.B.: PEP-625 (https://peps.python.org/pep-0625/) says sdists must use .tar.gz, but we
-        # have a known example of tar.bz2 in the wild in python-constraint 1.4.0 on PyPI:
-        # https://pypi.org/project/python-constraint/1.4.0/#files
-        # This probably all stems from the legacy `python setup.py sdist` as last described here:
-        #   https://docs.python.org/3.11/distutils/sourcedist.html
-        # There was a move to reject exotic formats in PEP-527 in 2016 and the historical sdist
-        # formats appear to be listed here: https://peps.python.org/pep-0527/#file-extensions
-        # A query on the PyPI dataset shows:
-        #
-        # SELECT
-        # REGEXP_EXTRACT(path, r'\.([^.]+|tar\.[^.]+|tar)$') as extension,
-        # count(*) as count
-        # FROM `bigquery-public-data.pypi.distribution_metadata`
-        # group by extension
-        # order by count desc
-        #
-        #   | extension | count   |
-        #   |-----------|---------|
-        #   | whl       | 6332494 |
-        # * | tar.gz    | 5283102 |
-        #   | egg       |  135940 |
-        # * | zip       |  108532 |
-        #   | exe       |   18452 |
-        # * | tar.bz2   |    3857 |
-        #   | msi       |     625 |
-        #   | rpm       |     603 |
-        # * | tgz       |     226 |
-        #   | dmg       |      47 |
-        #   | deb       |      36 |
-        # * | tar.zip   |       2 |
-        # * | ZIP       |       1 |
-        #
-        return path.endswith((".tar.gz", ".tgz", ".tar.bz2"))
-
     filename = attr.ib()  # type: str
 
     @property
     def is_source(self):
         # type: () -> bool
-        return self.is_tar_sdist(self.filename) or self.is_zip_sdist(self.filename)
+        return self.filename.endswith((".sdist", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".zip"))
 
     def parse_tags(self):
         # type: () -> Iterator[tags.Tag]
@@ -245,7 +200,9 @@ class VCSArtifact(Artifact):
                 )
             )
         return cls(
-            url=artifact_url,
+            # N.B.: We need the raw URL in order to have access to the fragment needed for
+            # `as_unparsed_requirement`.
+            url=artifact_url.raw_url,
             fingerprint=fingerprint,
             verified=verified,
             vcs=artifact_url.scheme.vcs,
@@ -259,13 +216,16 @@ class VCSArtifact(Artifact):
 
     def as_unparsed_requirement(self, project_name):
         # type: (ProjectName) -> str
-        names = self.url.fragment_parameters.get("egg")
-        if names and ProjectName(names[-1]) == project_name:
-            # A Pip proprietary VCS requirement.
-            return self.url.raw_url
+        url_info = urlparse.urlparse(self.url)
+        if url_info.fragment:
+            fragment_parameters = urlparse.parse_qs(url_info.fragment)
+            names = fragment_parameters.get("egg")
+            if names and ProjectName(names[-1]) == project_name:
+                # A Pip proprietary VCS requirement.
+                return self.url
         # A PEP-440 direct reference VCS requirement with the project name stripped from earlier
         # processing. See: https://peps.python.org/pep-0440/#direct-references
-        return "{project_name} @ {url}".format(project_name=project_name, url=self.url.raw_url)
+        return "{project_name} @ {url}".format(project_name=project_name, url=self.url)
 
 
 @attr.s(frozen=True)
@@ -476,11 +436,7 @@ class Resolved(object):
             )
 
         return cls(
-            target_specificity=(
-                smallest_rank_value
-                if not target_specificities
-                else sum(target_specificities) / len(target_specificities)
-            ),
+            target_specificity=sum(target_specificities) / len(target_specificities),
             downloadable_artifacts=tuple(downloadable_artifacts),
             source=source,
         )
@@ -595,10 +551,19 @@ class LockedResolve(object):
         constraints=(),  # type: Iterable[Requirement]
         source=None,  # type: Optional[str]
         transitive=True,  # type: bool
-        build_configuration=BuildConfiguration(),  # type: BuildConfiguration
+        build=True,  # type: bool
+        use_wheel=True,  # type: bool
+        prefer_older_binary=False,  # type: bool
         include_all_matches=False,  # type: bool
     ):
         # type: (...) -> Union[Resolved, Error]
+
+        is_local_interpreter = isinstance(target, LocalInterpreter)
+        if not use_wheel and not build:
+            return Error(
+                "Cannot both ignore wheels (use_wheel=False) and refrain from building "
+                "distributions (build=False)."
+            )
 
         repository = defaultdict(list)  # type: DefaultDict[ProjectName, List[LockedRequirement]]
         for locked_requirement in self.locked_requirements:
@@ -718,8 +683,8 @@ class LockedResolve(object):
                 ranked_artifacts = tuple(
                     locked_requirement.iter_compatible_artifacts(
                         target,
-                        build=build_configuration.allow_build(project_name),
-                        use_wheel=build_configuration.allow_wheel(project_name),
+                        build=build,
+                        use_wheel=use_wheel,
                     )
                 )
                 if not ranked_artifacts:
@@ -727,7 +692,7 @@ class LockedResolve(object):
                         attributed_reason(
                             "does not have any compatible artifacts:\n{artifacts}".format(
                                 artifacts="\n".join(
-                                    "    {url}".format(url=artifact.url.download_url)
+                                    "    {url}".format(url=artifact.url)
                                     for artifact in locked_requirement.iter_artifacts()
                                 )
                             )
@@ -773,7 +738,7 @@ class LockedResolve(object):
 
             compatible_artifacts.sort(
                 key=lambda ra: _ResolvedArtifactComparator(
-                    ra, prefer_older_binary=build_configuration.prefer_older_binary
+                    ra, prefer_older_binary=prefer_older_binary
                 ),
                 reverse=True,  # We want the highest rank sorted 1st.
             )
@@ -783,34 +748,22 @@ class LockedResolve(object):
                 resolved_artifacts.append(compatible_artifacts[0])
 
         if errors:
-            lines = [
-                "Failed to resolve all requirements for {target}{from_source}:".format(
+            from_source = " from {source}".format(source=source) if source else ""
+            return Error(
+                "Failed to resolve all requirements for {target}{from_source}:\n"
+                "\n"
+                "Configured with:\n"
+                "    build: {build}\n"
+                "    use_wheel: {use_wheel}\n"
+                "\n"
+                "{errors}".format(
                     target=target.render_description(),
-                    from_source=" from {source}".format(source=source) if source else "",
-                ),
-                "",
-                "Configured with:",
-            ]
-            lines.append("    build: {build}".format(build=build_configuration.allow_builds))
-            if build_configuration.only_builds:
-                lines.append(
-                    "    only_build: {only_build}".format(
-                        only_build=", ".join(sorted(map(str, build_configuration.only_builds)))
-                    )
+                    from_source=from_source,
+                    build=build,
+                    use_wheel=use_wheel,
+                    errors="\n\n".join("{error}".format(error=error) for error in errors),
                 )
-            lines.append(
-                "    use_wheel: {use_wheel}".format(use_wheel=build_configuration.allow_wheels)
             )
-            if build_configuration.only_wheels:
-                lines.append(
-                    "    only_wheel: {only_wheel}".format(
-                        only_wheel=", ".join(sorted(map(str, build_configuration.only_wheels)))
-                    )
-                )
-            for error in errors:
-                lines.append("")
-                lines.append(error)
-            return Error("\n".join(lines))
 
         uniqued_resolved_artifacts = []  # type: List[_ResolvedArtifact]
         seen = set()

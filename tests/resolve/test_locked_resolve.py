@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from textwrap import dedent
@@ -26,8 +26,7 @@ from pex.resolve.locked_resolve import (
     VCSArtifact,
     _ResolvedArtifact,
 )
-from pex.resolve.resolved_requirement import ArtifactURL, Fingerprint, PartialArtifact, Pin
-from pex.resolve.resolver_configuration import BuildConfiguration
+from pex.resolve.resolved_requirement import Fingerprint, PartialArtifact, Pin
 from pex.result import Error, try_
 from pex.sorted_tuple import SortedTuple
 from pex.targets import AbbreviatedPlatform, CompletePlatform, LocalInterpreter, Target
@@ -148,11 +147,7 @@ def test_build(
         ),
     )
     assert_resolved(
-        ansicolors_simple.resolve(
-            current_target,
-            [req("ansicolors")],
-            build_configuration=BuildConfiguration.create(allow_builds=False),
-        ),
+        ansicolors_simple.resolve(current_target, [req("ansicolors")], build=False),
         DownloadableArtifact.create(
             pin=pin("ansicolors", "1.1.7"),
             artifact=artifact(
@@ -183,11 +178,7 @@ def test_use_wheel(
         ),
     )
     assert_resolved(
-        ansicolors_simple.resolve(
-            current_target,
-            [req("ansicolors==1.1.7")],
-            build_configuration=BuildConfiguration.create(allow_wheels=False),
-        ),
+        ansicolors_simple.resolve(current_target, [req("ansicolors==1.1.7")], use_wheel=False),
         DownloadableArtifact.create(
             pin=pin("ansicolors", "1.1.7"),
             artifact=artifact(
@@ -273,6 +264,20 @@ def assert_error(
 def platform(plat):
     # type: (str) -> AbbreviatedPlatform
     return AbbreviatedPlatform.create(Platform.create(plat))
+
+
+def test_invalid_configuration(
+    current_target,  # type: Target
+    ansicolors_exotic,  # type: LockedResolve
+):
+    # type: (...) -> None
+    assert_error(
+        ansicolors_exotic.resolve(
+            current_target, [req("ansicolors")], build=False, use_wheel=False
+        ),
+        "Cannot both ignore wheels (use_wheel=False) and refrain from building distributions "
+        "(build=False).",
+    )
 
 
 def test_platform_resolve(ansicolors_exotic):
@@ -397,11 +402,7 @@ def test_wheel_tag_mismatch(
 ):
     # type: (...) -> None
     assert_error(
-        ansicolors_exotic.resolve(
-            current_target,
-            [req("ansicolors==1.1.*")],
-            build_configuration=BuildConfiguration.create(allow_builds=False),
-        ),
+        ansicolors_exotic.resolve(current_target, [req("ansicolors==1.1.*")], build=False),
         dedent(
             """\
             Failed to resolve all requirements for {target_description}:
@@ -577,11 +578,7 @@ def test_prefer_older_binary(current_target):
     )
 
     assert_resolved(
-        locked_resolve.resolve(
-            current_target,
-            [req("ansicolors>1")],
-            build_configuration=BuildConfiguration.create(prefer_older_binary=True),
-        ),
+        locked_resolve.resolve(current_target, [req("ansicolors>1")], prefer_older_binary=True),
         DownloadableArtifact.create(
             pin=pin("ansicolors", "1.1.7"),
             artifact=artifact(
@@ -762,11 +759,7 @@ def test_multiple_errors(
     # type: (...) -> None
 
     assert_error(
-        cyclic_resolve.resolve(
-            current_target,
-            [req("A==1.0.1")],
-            build_configuration=BuildConfiguration.create(allow_wheels=False),
-        ),
+        cyclic_resolve.resolve(current_target, [req("A==1.0.1")], use_wheel=False),
         dedent(
             """\
             Failed to resolve all requirements for {target_description}:
@@ -883,25 +876,25 @@ def test_vcs_artifact():
     # type: () -> None
 
     artifact = Artifact.from_url(
-        url="git+https://github.com/pex-tool/pex",
+        url="git+https://github.com/pantsbuild/pex",
         fingerprint=Fingerprint(algorithm="md5", hash="bar"),
     )
     assert isinstance(artifact, VCSArtifact)
     assert VCS.Git is artifact.vcs
     assert artifact.is_source
-    assert "pex @ git+https://github.com/pex-tool/pex" == artifact.as_unparsed_requirement(
+    assert "pex @ git+https://github.com/pantsbuild/pex" == artifact.as_unparsed_requirement(
         ProjectName("pex")
     )
 
     artifact = Artifact.from_url(
-        url="hg+https://github.com/pex-tool/pex#egg=pex&subdirectory=.",
+        url="hg+https://github.com/pantsbuild/pex#egg=pex&subdirectory=.",
         fingerprint=Fingerprint(algorithm="sha1", hash="bar"),
     )
     assert isinstance(artifact, VCSArtifact)
     assert VCS.Mercurial is artifact.vcs
     assert artifact.is_source
     assert (
-        "hg+https://github.com/pex-tool/pex#egg=pex&subdirectory=."
+        "hg+https://github.com/pantsbuild/pex#egg=pex&subdirectory=."
         == artifact.as_unparsed_requirement(ProjectName("pex"))
     )
 
@@ -910,19 +903,19 @@ def test_locked_requirement_mixed_artifacts_issue_2150():
     # type: () -> None
 
     file_artifact = FileArtifact(
-        url=ArtifactURL.parse("https://host/project.whl"),
+        url="https://host/project.whl",
         fingerprint=Fingerprint(algorithm="md5", hash="foo"),
         verified=False,
         filename="a.whl",
     )
     vcs_artifact = VCSArtifact(
-        url=ArtifactURL.parse("git+https://host/a/project"),
+        url="git+https://host/a/project",
         fingerprint=Fingerprint(algorithm="sha1", hash="bar"),
         verified=False,
         vcs=VCS.Git,
     )
     local_project_artifact = LocalProjectArtifact(
-        url=ArtifactURL.parse("file:///tmp/project"),
+        url="file:///tmp/project",
         fingerprint=Fingerprint(algorithm="sha256", hash="baz"),
         verified=False,
         directory="/tmp/project",
@@ -947,7 +940,7 @@ def test_locked_resolve_same_pins_mixed_primary_artifacts_issue_2150():
     file_artifact_requirement = LockedRequirement.create(
         pin,
         FileArtifact(
-            url=ArtifactURL.parse("https://host/project.whl"),
+            url="https://host/project.whl",
             fingerprint=Fingerprint(algorithm="md5", hash="foo"),
             verified=False,
             filename="a.whl",
@@ -956,7 +949,7 @@ def test_locked_resolve_same_pins_mixed_primary_artifacts_issue_2150():
     vcs_artifact_requirement = LockedRequirement.create(
         pin,
         VCSArtifact(
-            url=ArtifactURL.parse("git+https://host/a/project"),
+            url="git+https://host/a/project",
             fingerprint=Fingerprint(algorithm="sha1", hash="bar"),
             verified=False,
             vcs=VCS.Git,
@@ -965,7 +958,7 @@ def test_locked_resolve_same_pins_mixed_primary_artifacts_issue_2150():
     local_project_artifact_requirement = LockedRequirement.create(
         pin,
         LocalProjectArtifact(
-            url=ArtifactURL.parse("file:///tmp/project"),
+            url="file:///tmp/project",
             fingerprint=Fingerprint(algorithm="sha256", hash="baz"),
             verified=False,
             directory="/tmp/project",

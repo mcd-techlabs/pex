@@ -1,4 +1,4 @@
-# Copyright 2020 Pex project contributors.
+# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, print_function
@@ -12,12 +12,10 @@ import sys
 import tempfile
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace, _ActionsContainer
 from contextlib import contextmanager
-from subprocess import CalledProcessError
 
 from pex import pex_warnings
 from pex.argparse import HandleBoolAction
 from pex.common import safe_mkdtemp, safe_open
-from pex.compatibility import shlex_quote
 from pex.result import Error, Ok, Result
 from pex.typing import TYPE_CHECKING, Generic, cast
 from pex.variables import ENV, Variables
@@ -33,7 +31,6 @@ if TYPE_CHECKING:
         NoReturn,
         Optional,
         Sequence,
-        Tuple,
         Type,
         TypeVar,
     )
@@ -51,23 +48,11 @@ def try_run_program(
     args,  # type: Iterable[str]
     url=None,  # type: Optional[str]
     error=None,  # type: Optional[str]
-    disown=False,  # type: bool
     **kwargs  # type: Any
 ):
     # type: (...) -> Result
-    cmd = [program] + list(args)
     try:
-        process = subprocess.Popen(cmd, preexec_fn=os.setsid if disown else None, **kwargs)
-        if not disown and process.wait() != 0:
-            return Error(
-                str(
-                    CalledProcessError(
-                        returncode=process.returncode,
-                        cmd=" ".join(shlex_quote(arg) for arg in cmd),
-                    )
-                ),
-                exit_code=process.returncode,
-            )
+        subprocess.check_call([program] + list(args), **kwargs)
         return Ok()
     except OSError as e:
         msg = [error] if error else []
@@ -77,35 +62,22 @@ def try_run_program(
                 "Find more information on `{program}` at {url}.".format(program=program, url=url)
             )
         return Error("\n".join(msg))
+    except subprocess.CalledProcessError as e:
+        return Error(str(e), exit_code=e.returncode)
 
 
 def try_open_file(
     path,  # type: str
-    open_program=None,  # type: Optional[str]
     error=None,  # type: Optional[str]
-    suppress_stderr=False,  # type: bool
 ):
     # type: (...) -> Result
-
-    url = None  # type: Optional[str]
-    if open_program:
-        opener = open_program
-    elif "Linux" == os.uname()[0]:
-        opener = "xdg-open"
-        url = "https://www.freedesktop.org/wiki/Software/xdg-utils/"
-    else:
-        opener = "open"
-
+    opener, url = (
+        ("xdg-open", "https://www.freedesktop.org/wiki/Software/xdg-utils/")
+        if "Linux" == os.uname()[0]
+        else ("open", None)
+    )
     with open(os.devnull, "wb") as devnull:
-        return try_run_program(
-            opener,
-            [path],
-            url=url,
-            error=error,
-            disown=True,
-            stdout=devnull,
-            stderr=devnull if suppress_stderr else None,
-        )
+        return try_run_program(opener, [path], url=url, error=error, stdout=devnull)
 
 
 @attr.s(frozen=True)
@@ -143,7 +115,6 @@ class Command(object):
         pass
 
     options = attr.ib()  # type: Namespace
-    passthrough_args = attr.ib(default=None)  # type: Optional[Tuple[str, ...]]
 
 
 class OutputMixin(object):
@@ -443,17 +414,7 @@ class Main(Generic["_C"]):
                 command_type.add_arguments(command_parser)
                 command_parser.set_defaults(command_type=command_type)
 
-        args = args or sys.argv[1:]
-        passthrough_args = None  # type: Optional[Tuple[str, ...]]
-        try:
-            passthrough_divide = args.index("--")
-        except ValueError:
-            pass
-        else:
-            passthrough_args = tuple(args[passthrough_divide + 1 :])
-            args = args[:passthrough_divide]
-
         options = parser.parse_args(args=args)
         with global_environment(options):
             command_type = cast("Type[_C]", options.command_type)
-            yield command_type(options, passthrough_args)
+            yield command_type(options)

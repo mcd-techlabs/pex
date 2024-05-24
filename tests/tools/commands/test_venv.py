@@ -1,4 +1,4 @@
-# Copyright 2020 Pex project contributors.
+# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -477,13 +477,6 @@ def test_venv_copies(tmpdir):
     assert not os.path.islink(venv_copies_interpreter.binary)
 
 
-@pytest.mark.skipif(
-    PythonInterpreter.get().identity.pypy_version == (7, 3, 14),
-    reason=(
-        "The PyPy 7.3.14 release creates non-relocatable venvs: "
-        "https://github.com/pypy/pypy/issues/4838"
-    ),
-)
 def test_relocatable_venv(tmpdir):
     # type: (Any) -> None
 
@@ -776,7 +769,7 @@ def test_remove(
     # type: (...) -> None
     pex_root = os.path.join(str(tmpdir), "pex_root")
 
-    def create_pex():
+    def create_venv_pex():
         # type: () -> str
         venv_pex = os.path.join(str(tmpdir), "venv.pex")
         run_pex_command(
@@ -785,8 +778,6 @@ def test_remove(
                 pex_root,
                 "--runtime-pex-root",
                 pex_root,
-                "--layout",
-                str(layout),
                 "-o",
                 venv_pex,
                 "--include-tools",
@@ -797,31 +788,29 @@ def test_remove(
     venv_dir = os.path.join(str(tmpdir), "venv_dir")
     assert not os.path.exists(venv_dir)
 
-    pex = create_pex()
-    subprocess.check_call(
-        args=[sys.executable, pex, "venv", venv_dir], env=make_env(PEX_TOOLS=True)
-    )
+    venv_pex = create_venv_pex()
+    subprocess.check_call(args=[venv_pex, "venv", venv_dir], env=make_env(PEX_TOOLS=True))
     assert os.path.exists(venv_dir)
-    assert os.path.exists(pex)
+    assert os.path.exists(venv_pex)
     assert os.path.exists(pex_root)
 
     shutil.rmtree(venv_dir)
     assert not os.path.exists(venv_dir)
 
     subprocess.check_call(
-        args=[sys.executable, pex, "venv", "--rm", "pex", venv_dir], env=make_env(PEX_TOOLS=True)
+        args=[venv_pex, "venv", "--rm", "pex", venv_dir], env=make_env(PEX_TOOLS=True)
     )
     assert os.path.exists(venv_dir)
-    assert not os.path.exists(pex)
+    assert not os.path.exists(venv_pex)
     assert os.path.exists(pex_root)
 
     shutil.rmtree(venv_dir)
     assert not os.path.exists(venv_dir)
-    pex = create_pex()
+    venv_pex = create_venv_pex()
 
     subprocess.check_call(
-        args=[sys.executable, pex, "venv", "--rm", "all", venv_dir], env=make_env(PEX_TOOLS=True)
+        args=[venv_pex, "venv", "--rm", "all", venv_dir], env=make_env(PEX_TOOLS=True)
     )
     assert os.path.exists(venv_dir)
-    assert not os.path.exists(pex)
+    assert not os.path.exists(venv_pex)
     assert not os.path.exists(pex_root)

@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -32,7 +32,6 @@ def test_import_from_pex(
     tmpdir,  # type: Any
     layout,  # type: Layout.Value
     execution_mode_args,  # type: List[str]
-    pex_project_dir,  # type: str
 ):
     # type: (...) -> None
 
@@ -70,7 +69,7 @@ def test_import_from_pex(
             src,
             "ansicolors==1.1.8",
             # Add pex to verify that it will shadow bootstrap pex
-            pex_project_dir,
+            "pex==2.1.139",
             "-o",
             pex,
             "--layout",
@@ -101,12 +100,12 @@ def test_import_from_pex(
     alternate_pex_root = os.path.join(str(tmpdir), "alternate_pex_root")
     with ENV.patch(PEX_ROOT=alternate_pex_root):
         ambient_sys_path = [
-            resolved_distribution.fingerprinted_distribution.distribution.location
-            for resolved_distribution in resolve_from_pex(
+            installed_distribution.fingerprinted_distribution.distribution.location
+            for installed_distribution in resolve_from_pex(
                 targets=Targets.from_target(targets.current()),
                 pex=pex,
                 requirements=["ansicolors==1.1.8"],
-            ).distributions
+            ).installed_distributions
         ]
 
     third_party_path = execute_with_pex_on_pythonpath(

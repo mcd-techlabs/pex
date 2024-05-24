@@ -1,5 +1,0 @@
-furo
-httpx
-myst-parser[linkify]
-sphinx
-sphinx-simplepdf

@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -69,7 +69,7 @@ def test_isolated_pex_zip(tmpdir):
         "Since we just ran the Pex tool and nothing else, a single isolation of the Pex loose "
         "source in this repo should have occurred."
     )
-    assert {"pip", "toml"}.issubset(
+    assert {"pip", "wheel"}.issubset(
         list(current_isolated_vendoreds.values())[0]
     ), "Expected isolation of current Pex code to be a full build-time isolation."
 
@@ -79,12 +79,10 @@ def test_isolated_pex_zip(tmpdir):
     shutil.copytree("pex", os.path.join(modified_pex_src, "pex"))
     with open(os.path.join(modified_pex_src, "pex", "version.py"), "a") as fp:
         fp.write("# modified\n")
-    # N.B.: build-backend/, README.rst and LICENSE are needed by the build process: we configure
-    # our PEP-517 project to use these paths for the in-tree build backend, distribution readme
-    # and distribution license respectively.
-    shutil.copytree("build-backend", os.path.join(modified_pex_src, "build-backend"))
-    for build_file in ("pyproject.toml", "README.rst", "LICENSE"):
-        shutil.copy(build_file, os.path.join(modified_pex_src, build_file))
+    shutil.copy("pyproject.toml", os.path.join(modified_pex_src, "pyproject.toml"))
+    # N.B.: README.rst is needed by flit since we tell it to pull the distribution description from
+    # there when building the Pex distribution.
+    shutil.copy("README.rst", os.path.join(modified_pex_src, "README.rst"))
 
     modified_pex = os.path.join(str(tmpdir), "modified.pex")
     subprocess.check_call(
@@ -97,10 +95,13 @@ def test_isolated_pex_zip(tmpdir):
     current_pex_isolation = set(current_isolated_vendoreds.keys()) ^ set(
         current_pex_isolated_vendoreds.keys()
     )
-    assert 0 == len(current_pex_isolation), (
-        "Since the current Pex PEX was built from the same Pex code as the current loose source "
-        "Pex, a new isolation of the Pex PEX bootstrap code should not have occurred."
+    assert 1 == len(current_pex_isolation), (
+        "Since the modified Pex PEX was built from a Pex PEX an isolation of the Pex PEX bootstrap "
+        "code should have occurred bringing the total isolations up to two."
     )
+    current_pex_vendoreds = current_pex_isolated_vendoreds[current_pex_isolation.pop()]
+    assert "pip" not in current_pex_vendoreds, "Expected a Pex runtime isolation."
+    assert "wheel" not in current_pex_vendoreds, "Expected a Pex runtime isolation."
 
     # 3. Isolate modified Pex PEX at build-time.
     # ===
@@ -123,7 +124,7 @@ def test_isolated_pex_zip(tmpdir):
         "Since the ansicolors PEX was built from the modified Pex PEX a new isolation of the "
         "modified Pex PEX code should have occurred bringing the total isolations up to three."
     )
-    assert {"pip", "toml"}.issubset(
+    assert {"pip", "wheel"}.issubset(
         modified_pex_isolated_vendoreds[modified_pex_isolation.pop()]
     ), "Expected isolation of modified Pex code to be a full build-time isolation."
 
@@ -142,7 +143,7 @@ def test_isolated_pex_zip(tmpdir):
     )
     ansicolors_pex_vendoreds = ansicolors_pex_isolated_vendoreds[ansicolors_pex_isolation.pop()]
     assert "pip" not in ansicolors_pex_vendoreds, "Expected a Pex runtime isolation."
-    assert "toml" not in ansicolors_pex_vendoreds, "Expected a Pex runtime isolation."
+    assert "wheel" not in ansicolors_pex_vendoreds, "Expected a Pex runtime isolation."
 
     # 5. No new isolations.
     # ===

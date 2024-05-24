@@ -1,12 +1,11 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
 
 import os
-import sys
-from textwrap import dedent
 
+from pex import targets
 from pex.dist_metadata import Requirement
 from pex.enum import Enum
 from pex.pep_440 import Version
@@ -15,7 +14,7 @@ from pex.third_party.packaging.specifiers import SpecifierSet
 from pex.typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from typing import Iterable, Optional, Tuple, Union
+    from typing import Iterable, Optional, Tuple
 
 
 class PipVersionValue(Enum.Value):
@@ -73,12 +72,9 @@ class PipVersionValue(Enum.Value):
         return self.requirement, self.setuptools_requirement, self.wheel_requirement
 
     def requires_python_applies(self, target=None):
-        # type: (Optional[Union[Version,Target]]) -> bool
+        # type: (Optional[Target]) -> bool
         if not self.requires_python:
             return True
-
-        if isinstance(target, Version):
-            return str(target) in self.requires_python
 
         return LocalInterpreter.create(
             interpreter=target.get_interpreter() if target else None
@@ -106,38 +102,23 @@ class DefaultPipVersion(object):
     def __get__(self, obj, objtype=None):
         if not hasattr(self, "_default"):
             self._default = None
-            current_version = Version(".".join(map(str, sys.version_info[:3])))
+            current_target = targets.current()
             preferred_versions = (
                 [PipVersionValue.overridden()] if PipVersionValue.overridden() else self._preferred
             )
             for preferred_version in preferred_versions:
-                if preferred_version.requires_python_applies(current_version):
+                if preferred_version.requires_python_applies(current_target):
                     self._default = preferred_version
                     break
             if self._default is None:
-                applicable_versions = tuple(
-                    version
-                    for version in PipVersionValue._iter_values()
-                    if not version.hidden and version.requires_python_applies(current_version)
+                self._default = max(
+                    (
+                        version
+                        for version in PipVersionValue._iter_values()
+                        if not version.hidden and version.requires_python_applies(current_target)
+                    ),
+                    key=lambda pv: pv.version,
                 )
-                if not applicable_versions:
-                    raise ValueError(
-                        dedent(
-                            """\
-                            No version of Pip supported by Pex works with {python}.
-                            The supported Pip versions are:
-                            {versions}
-                            """
-                        ).format(
-                            python=sys.executable,
-                            versions=", ".join(
-                                version.value
-                                for version in PipVersionValue._iter_values()
-                                if not version.hidden
-                            ),
-                        )
-                    )
-                self._default = max(applicable_versions, key=lambda pv: pv.version)
         return self._default
 
 
@@ -157,15 +138,14 @@ class PipVersion(Enum["PipVersionValue"]):
         name="20.3.4-patched",
         version="20.3.4+patched",
         requirement=(
-            "pip @ git+https://github.com/pex-tool/pip@386a54f097ece66775d0c7f34fd29bb596c6b0be"
+            "pip @ git+https://github.com/pantsbuild/pip@386a54f097ece66775d0c7f34fd29bb596c6b0be"
         ),
-        wheel_version="0.37.1",
         requires_python="<3.12",
     )
 
     # TODO(John Sirois): Expose setuptools and wheel version flags - these don't affect
     #  Pex; so we should allow folks to experiment with upgrade easily:
-    #  https://github.com/pex-tool/pex/issues/1895
+    #  https://github.com/pantsbuild/pex/issues/1895
 
     v22_2_2 = PipVersionValue(
         version="22.2.2",
@@ -227,49 +207,7 @@ class PipVersion(Enum["PipVersionValue"]):
         version="23.2",
         setuptools_version="68.0.0",
         wheel_version="0.40.0",
-        requires_python=">=3.7,<3.13",
-    )
-
-    v23_3_1 = PipVersionValue(
-        version="23.3.1",
-        # N.B.: The setuptools 68.2.2 release was available on 10/21/2023 (the Pip 23.3.1 release
-        # date) but 68.0.0 is the last setuptools version to support 3.7.
-        setuptools_version="68.0.0",
-        wheel_version="0.41.2",
-        requires_python=">=3.7,<3.13",
-    )
-
-    v23_3_2 = PipVersionValue(
-        version="23.3.2",
-        # N.B.: The setuptools 69.0.2 release was available on 12/17/2023 (the Pip 23.3.2 release
-        # date) but 68.0.0 is the last setuptools version to support 3.7.
-        setuptools_version="68.0.0",
-        wheel_version="0.42.0",
-        requires_python=">=3.7,<3.13",
-    )
-
-    v24_0 = PipVersionValue(
-        version="24.0",
-        # N.B.: The setuptools 69.0.3 release was available on 2/03/2024 (the Pip 24.0 release
-        # date) but 68.0.0 is the last setuptools version to support 3.7.
-        setuptools_version="68.0.0",
-        wheel_version="0.42.0",
-        requires_python=">=3.7,<3.13",
-    )
-
-    # This is https://github.com/pypa/pip/pull/12462 which is approved but not yet merged or
-    # released. It allows testing Python 3.13 pre-releases but should not be used by the public; so
-    # we keep it hidden.
-    v24_0_dev0_patched = PipVersionValue(
-        name="24.0.dev0-patched",
-        version="24.0.dev0+patched",
-        requirement=(
-            "pip @ git+https://github.com/jsirois/pip@0257c9422f7bb99a6f319b54f808a5c50339be6c"
-        ),
-        setuptools_version="69.0.3",
-        wheel_version="0.42.0",
         requires_python=">=3.7",
-        hidden=True,
     )
 
     VENDORED = v20_3_4_patched

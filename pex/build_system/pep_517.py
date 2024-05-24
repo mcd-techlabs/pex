@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -6,13 +6,14 @@ from __future__ import absolute_import
 import json
 import os
 import subprocess
+import sys
 from textwrap import dedent
 
 from pex import third_party
 from pex.build_system import DEFAULT_BUILD_BACKEND
 from pex.build_system.pep_518 import BuildSystem, load_build_system
 from pex.common import safe_mkdtemp
-from pex.dist_metadata import DistMetadata, Distribution, MetadataType
+from pex.dist_metadata import DistMetadata, Distribution
 from pex.jobs import Job, SpawnedJob
 from pex.pip.version import PipVersion, PipVersionValue
 from pex.resolve.resolvers import Resolver
@@ -23,7 +24,7 @@ from pex.typing import TYPE_CHECKING, cast
 from pex.util import named_temporary_file
 
 if TYPE_CHECKING:
-    from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Text, Union
+    from typing import Any, Dict, Iterable, Mapping, Optional, Text, Tuple, Union
 
 _DEFAULT_BUILD_SYSTEMS = {}  # type: Dict[PipVersionValue, BuildSystem]
 
@@ -42,38 +43,30 @@ def _default_build_system(
             "Building {build_backend} build_backend PEX".format(build_backend=DEFAULT_BUILD_BACKEND)
         ):
             extra_env = {}  # type: Dict[str, str]
-            resolved_reqs = set()  # type: Set[str]
-            resolved_dists = []  # type: List[Distribution]
             if selected_pip_version is PipVersion.VENDORED:
-                requires = ["setuptools", selected_pip_version.wheel_requirement]
-                resolved_dists.extend(
+                requires = ["setuptools", "wheel"]
+                resolved = tuple(
                     Distribution.load(dist_location)
-                    for dist_location in third_party.expose(
-                        ["setuptools"], interpreter=target.get_interpreter()
-                    )
+                    for dist_location in third_party.expose(requires)
                 )
-                resolved_reqs.add("setuptools")
                 extra_env.update(__PEX_UNVENDORED__="1")
             else:
                 requires = [
                     selected_pip_version.setuptools_requirement,
                     selected_pip_version.wheel_requirement,
                 ]
-            unresolved = [
-                requirement for requirement in requires if requirement not in resolved_reqs
-            ]
-            resolved_dists.extend(
-                resolved_distribution.fingerprinted_distribution.distribution
-                for resolved_distribution in resolver.resolve_requirements(
-                    requirements=unresolved,
-                    targets=Targets.from_target(target),
-                ).distributions
-            )
+                resolved = tuple(
+                    installed_distribution.fingerprinted_distribution.distribution
+                    for installed_distribution in resolver.resolve_requirements(
+                        requirements=requires,
+                        targets=Targets.from_target(target),
+                    ).installed_distributions
+                )
             build_system = try_(
                 BuildSystem.create(
                     interpreter=target.get_interpreter(),
                     requires=requires,
-                    resolved=resolved_dists,
+                    resolved=resolved,
                     build_backend=DEFAULT_BUILD_BACKEND,
                     backend_path=(),
                     **extra_env
@@ -117,6 +110,8 @@ def _invoke_build_hook(
     hook_args=(),  # type: Iterable[Any]
     hook_extra_requirements=None,  # type: Optional[Iterable[str]]
     hook_kwargs=None,  # type: Optional[Mapping[str, Any]]
+    stdout=None,  # type: Optional[int]
+    stderr=None,  # type: Optional[int]
     pip_version=None,  # type: Optional[PipVersionValue]
 ):
     # type: (...) -> Union[SpawnedJob[Any], Error]
@@ -180,8 +175,8 @@ def _invoke_build_hook(
             args=args,
             env=build_system.env,
             cwd=project_directory,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout if stdout is not None else sys.stderr.fileno(),
+            stderr=stderr if stderr is not None else sys.stderr.fileno(),
         )
         return SpawnedJob.file(
             Job(command=args, process=process),
@@ -277,4 +272,4 @@ def spawn_prepare_metadata(
             pip_version=pip_version,
         )
     )
-    return spawned_job.map(lambda _: DistMetadata.load(build_dir, MetadataType.DIST_INFO))
+    return spawned_job.map(lambda _: DistMetadata.load(build_dir))

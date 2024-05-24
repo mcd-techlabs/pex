@@ -1,18 +1,17 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, print_function
 
 import os
 
-from pex.dist_metadata import Constraint, Requirement
+from pex.dist_metadata import Requirement
 from pex.orderedset import OrderedSet
-from pex.pep_503 import ProjectName
 from pex.pip.version import PipVersion, PipVersionValue
 from pex.requirements import LocalProjectRequirement
 from pex.resolve.locked_resolve import LocalProjectArtifact, LockedResolve, LockStyle, TargetSystem
 from pex.resolve.resolved_requirement import Pin
-from pex.resolve.resolver_configuration import BuildConfiguration, ResolverVersion
+from pex.resolve.resolver_configuration import ResolverVersion
 from pex.sorted_tuple import SortedTuple
 from pex.typing import TYPE_CHECKING
 
@@ -36,9 +35,13 @@ class Lockfile(object):
         requires_python,  # type: Iterable[str]
         target_systems,  # type: Iterable[TargetSystem.Value]
         requirements,  # type: Iterable[Union[Requirement, ParsedRequirement]]
-        constraints,  # type: Iterable[Constraint]
+        constraints,  # type: Iterable[Requirement]
         allow_prereleases,  # type: bool
-        build_configuration,  # type: BuildConfiguration
+        allow_wheels,  # type: bool
+        allow_builds,  # type: bool
+        prefer_older_binary,  # type: bool
+        use_pep517,  # type: Optional[bool]
+        build_isolation,  # type: bool
         transitive,  # type: bool
         locked_resolves,  # type: Iterable[LockedResolve]
         source=None,  # type: Optional[str]
@@ -96,13 +99,11 @@ class Lockfile(object):
             requirements=SortedTuple(resolve_requirements, key=str),
             constraints=SortedTuple(constraints, key=str),
             allow_prereleases=allow_prereleases,
-            allow_wheels=build_configuration.allow_wheels,
-            only_wheels=SortedTuple(build_configuration.only_wheels),
-            allow_builds=build_configuration.allow_builds,
-            only_builds=SortedTuple(build_configuration.only_builds),
-            prefer_older_binary=build_configuration.prefer_older_binary,
-            use_pep517=build_configuration.use_pep517,
-            build_isolation=build_configuration.build_isolation,
+            allow_wheels=allow_wheels,
+            allow_builds=allow_builds,
+            prefer_older_binary=prefer_older_binary,
+            use_pep517=use_pep517,
+            build_isolation=build_isolation,
             transitive=transitive,
             locked_resolves=SortedTuple(locked_resolves),
             local_project_requirement_mapping=requirement_by_local_project_directory,
@@ -116,12 +117,10 @@ class Lockfile(object):
     pip_version = attr.ib()  # type: PipVersionValue
     resolver_version = attr.ib()  # type: ResolverVersion.Value
     requirements = attr.ib()  # type: SortedTuple[Requirement]
-    constraints = attr.ib()  # type: SortedTuple[Constraint]
+    constraints = attr.ib()  # type: SortedTuple[Requirement]
     allow_prereleases = attr.ib()  # type: bool
     allow_wheels = attr.ib()  # type: bool
-    only_wheels = attr.ib()  # type: SortedTuple[ProjectName]
     allow_builds = attr.ib()  # type: bool
-    only_builds = attr.ib()  # type: SortedTuple[ProjectName]
     prefer_older_binary = attr.ib()  # type: bool
     use_pep517 = attr.ib()  # type: Optional[bool]
     build_isolation = attr.ib()  # type: bool
@@ -129,15 +128,3 @@ class Lockfile(object):
     locked_resolves = attr.ib()  # type: SortedTuple[LockedResolve]
     local_project_requirement_mapping = attr.ib(eq=False)  # type: Mapping[str, Requirement]
     source = attr.ib(default=None, eq=False)  # type: Optional[str]
-
-    def build_configuration(self):
-        # type: () -> BuildConfiguration
-        return BuildConfiguration.create(
-            allow_builds=self.allow_builds,
-            only_builds=self.only_builds,
-            allow_wheels=self.allow_wheels,
-            only_wheels=self.only_wheels,
-            prefer_older_binary=self.prefer_older_binary,
-            use_pep517=self.use_pep517,
-            build_isolation=self.build_isolation,
-        )

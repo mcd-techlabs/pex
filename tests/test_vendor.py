@@ -1,4 +1,4 @@
-# Copyright 2019 Pex project contributors.
+# Copyright 2019 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -26,8 +26,8 @@ def test_git():
         repo="https://github.com/foo.git", commit="da39a3ee", project_name="bar"
     )
     assert "bar" == vendor_spec.key
-    assert "bar @ git+https://github.com/foo.git@da39a3ee" == vendor_spec.requirement
-    assert "bar @ git+https://github.com/foo.git@da39a3ee" == vendor_spec.prepare()
+    assert "git+https://github.com/foo.git@da39a3ee#egg=bar" == vendor_spec.requirement
+    assert "git+https://github.com/foo.git@da39a3ee#egg=bar" == vendor_spec.prepare()
 
 
 def test_git_prep_command(tmpdir):
@@ -55,7 +55,7 @@ def test_git_prep_command(tmpdir):
     )
     assert not os.path.exists(prep_file)
 
-    assert "bar @ git+{repo}@{commit}".format(repo=repo, commit=commit) == vendor_spec.requirement
+    assert "git+{repo}@{commit}#egg=bar".format(repo=repo, commit=commit) == vendor_spec.requirement
     assert not os.path.exists(prep_file)
 
     clone = vendor_spec.prepare()

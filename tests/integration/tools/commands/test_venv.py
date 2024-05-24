@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -8,14 +8,14 @@ from textwrap import dedent
 
 from colors import cyan
 
-from pex.common import is_pyc_file, safe_open
+from pex.common import filter_pyc_files, safe_open
 from pex.typing import TYPE_CHECKING
 from pex.util import CacheHelper
 from pex.venv.virtualenv import Virtualenv
 from testing import IntegResults, make_env, run_pex_command
 
 if TYPE_CHECKING:
-    from typing import Any, Set, Text
+    from typing import Any, Set
 
 
 def run_pex_tools(*args):
@@ -198,12 +198,11 @@ def test_scope_issue_1631(tmpdir):
         return Virtualenv(venv_dir)
 
     def recursive_listing(venv_dir):
-        # type: (str) -> Set[Text]
+        # type: (str) -> Set[str]
         return {
             os.path.relpath(os.path.join(root, f), venv_dir)
             for root, _, files in os.walk(venv_dir)
-            for f in files
-            if not is_pyc_file(f)
+            for f in filter_pyc_files(files)
         }
 
     def site_packages_path(

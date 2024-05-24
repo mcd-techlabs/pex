@@ -1,4 +1,4 @@
-# Copyright 2017 Pex project contributors.
+# Copyright 2017 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 # A library of functions for filtering Python interpreters based on compatibility constraints
@@ -8,7 +8,7 @@ from __future__ import absolute_import
 import itertools
 
 from pex.compatibility import indent
-from pex.dist_metadata import Requirement, RequirementParseError
+from pex.dist_metadata import ProjectNameAndVersion, Requirement, RequirementParseError
 from pex.enum import Enum
 from pex.interpreter import PythonInterpreter
 from pex.orderedset import OrderedSet
@@ -197,7 +197,7 @@ class UnsatisfiableInterpreterConstraintsError(Exception):
             failures_message = (
                 "{}\n"
                 "\n"
-                "(See https://github.com/pex-tool/pex/issues/1027 for a list of known breaks and "
+                "(See https://github.com/pantsbuild/pex/issues/1027 for a list of known breaks and "
                 "workarounds.)"
             ).format(
                 "\n".join(
@@ -316,13 +316,13 @@ COMPATIBLE_PYTHON_VERSIONS = (
     # N.B.: Pex does not support the missing 3.x versions here.
     PythonVersion(Lifecycle.EOL, 3, 5, 10),
     PythonVersion(Lifecycle.EOL, 3, 6, 15),
-    PythonVersion(Lifecycle.EOL, 3, 7, 17),
-    PythonVersion(Lifecycle.STABLE, 3, 8, 19),
-    PythonVersion(Lifecycle.STABLE, 3, 9, 19),
-    PythonVersion(Lifecycle.STABLE, 3, 10, 14),
-    PythonVersion(Lifecycle.STABLE, 3, 11, 9),
-    PythonVersion(Lifecycle.STABLE, 3, 12, 3),
-    PythonVersion(Lifecycle.DEV, 3, 13, 0),
+    # ^-- EOL --^
+    PythonVersion(Lifecycle.STABLE, 3, 7, 17),
+    PythonVersion(Lifecycle.STABLE, 3, 8, 17),
+    PythonVersion(Lifecycle.STABLE, 3, 9, 17),
+    PythonVersion(Lifecycle.STABLE, 3, 10, 12),
+    PythonVersion(Lifecycle.STABLE, 3, 11, 4),
+    PythonVersion(Lifecycle.DEV, 3, 12, 0),
 )
 
 

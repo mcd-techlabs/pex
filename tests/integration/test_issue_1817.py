@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -63,13 +63,7 @@ def test_sdist_for_project_with_native_extensions(tmpdir):
     assert_create_and_use_sdist_lock(tmpdir, "psutil==5.9.1", "import psutil")
 
 
-@pytest.mark.skipif(
-    sys.version_info < (3, 6) or sys.version_info >= (3, 13),
-    reason=(
-        "PyYAML 6.0.1 requires Python >= 3.6. PyYAML also requires Cython to build but Cython "
-        "(3.0.7) itself fails to build from source under 3.13 due to Python C API changes."
-    ),
-)
+@pytest.mark.skipif(sys.version_info[:2] < (3, 6), reason="PyYAML 6.0.1 requires Python >= 3.6")
 def test_sdist_for_project_with_pep517_build(tmpdir):
     # type: (Any) -> None
     assert_create_and_use_sdist_lock(tmpdir, "PyYAML==6.0.1", "import yaml")

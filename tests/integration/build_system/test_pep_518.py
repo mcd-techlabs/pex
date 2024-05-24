@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os.path
@@ -55,6 +55,5 @@ def test_load_build_system_pyproject_custom_repos(
     build_system = load_build_system(current_target, custom_resolver, pex_project_dir)
     assert isinstance(build_system, BuildSystem)
     subprocess.check_call(
-        args=[build_system.venv_pex.pex, "-c", "import {}".format(build_system.build_backend)],
-        env=build_system.env,
+        args=[build_system.venv_pex.pex, "-c", "import {}".format(build_system.build_backend)]
     )

@@ -1,20 +1,23 @@
-# Copyright 2023 Pex project contributors.
+# Copyright 2023 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import, print_function
 
+import errno
+import itertools
 import os
+import shutil
 import subprocess
 from collections import Counter, OrderedDict, defaultdict
 from textwrap import dedent
 
 from pex import layout, pex_warnings
-from pex.common import chmod_plus_x, iter_copytree, pluralize
+from pex.common import chmod_plus_x, pluralize, safe_mkdir
 from pex.compatibility import is_valid_python_identifier
 from pex.dist_metadata import Distribution
 from pex.environment import PEXEnvironment
 from pex.orderedset import OrderedSet
-from pex.pep_376 import InstalledWheel
+from pex.pep_376 import InstalledWheel, LoadError
 from pex.pep_440 import Version
 from pex.pep_503 import ProjectName
 from pex.pex import PEX
@@ -25,21 +28,10 @@ from pex.util import CacheHelper
 from pex.venv.bin_path import BinPath
 from pex.venv.install_scope import InstallScope
 from pex.venv.virtualenv import PipUnavailableError, Virtualenv
-from pex.wheel import Wheel, WheelMetadataLoadError
 
 if TYPE_CHECKING:
     import typing
-    from typing import (
-        Container,
-        DefaultDict,
-        Iterable,
-        Iterator,
-        List,
-        Optional,
-        Text,
-        Tuple,
-        Union,
-    )
+    from typing import Container, DefaultDict, Iterable, Iterator, List, Optional, Tuple, Union
 
     import attr  # vendor:skip
 else:
@@ -85,7 +77,7 @@ def ensure_pip_installed(
                 "The virtual environment was successfully created, but Pip was not "
                 "installed:\n{}".format(e)
             )
-        venv_pip_version = find_dist(_PIP, venv.iter_distributions(rescan=True))
+        venv_pip_version = find_dist(_PIP, venv.iter_distributions())
         if not venv_pip_version:
             return Error(
                 "Failed to install pip into venv at {venv_dir}".format(venv_dir=venv.venv_dir)
@@ -145,6 +137,67 @@ def ensure_pip_installed(
     return pex_pip_version or venv_pip_version
 
 
+def _relative_symlink(
+    src,  # type: str
+    dst,  # type: str
+):
+    # type: (...) -> None
+    dst_parent = os.path.dirname(dst)
+    rel_src = os.path.relpath(src, dst_parent)
+    os.symlink(rel_src, dst)
+
+
+# N.B.: We can't use shutil.copytree since we copy from multiple source locations to the same site
+# packages directory destination. Since we're forced to stray from the stdlib here, support for
+# hardlinks is added to provide a measurable speed-up and disk space savings when possible.
+def _copytree(
+    src,  # type: str
+    dst,  # type: str
+    exclude=(),  # type: Container[str]
+    symlink=False,  # type: bool
+):
+    # type: (...) -> Iterator[Tuple[str, str]]
+    safe_mkdir(dst)
+    link = True
+    for root, dirs, files in os.walk(src, topdown=True, followlinks=True):
+        if src == root:
+            dirs[:] = [d for d in dirs if d not in exclude]
+            files[:] = [f for f in files if f not in exclude]
+
+        for path, is_dir in itertools.chain(
+            zip(dirs, itertools.repeat(True)), zip(files, itertools.repeat(False))
+        ):
+            src_entry = os.path.join(root, path)
+            dst_entry = os.path.join(dst, os.path.relpath(src_entry, src))
+            if not is_dir:
+                yield src_entry, dst_entry
+            try:
+                if symlink:
+                    _relative_symlink(src_entry, dst_entry)
+                elif is_dir:
+                    os.mkdir(dst_entry)
+                else:
+                    # We only try to link regular files since linking a symlink on Linux can produce
+                    # another symlink, which leaves open the possibility the src_entry target could
+                    # later go missing leaving the dst_entry dangling.
+                    if link and not os.path.islink(src_entry):
+                        try:
+                            os.link(src_entry, dst_entry)
+                            continue
+                        except OSError as e:
+                            if e.errno != errno.EXDEV:
+                                raise e
+                            link = False
+                    shutil.copy(src_entry, dst_entry)
+            except OSError as e:
+                if e.errno != errno.EEXIST:
+                    raise e
+
+        if symlink:
+            # Once we've symlinked the top-level directories and files, we've "copied" everything.
+            return
+
+
 class CollisionError(Exception):
     """Indicates multiple distributions provided the same file when merging a PEX into a venv."""
 
@@ -171,7 +224,7 @@ class Provenance(object):
         # type: (...) -> None
         self._target_dir = target_dir
         self._target_python = target_python
-        self._provenance = defaultdict(list)  # type: DefaultDict[Text, List[Text]]
+        self._provenance = defaultdict(list)  # type: DefaultDict[str, List[str]]
 
     @property
     def target_python(self):
@@ -188,7 +241,7 @@ class Provenance(object):
         return "#!{shebang}".format(shebang=" ".join(shebang_argv))
 
     def record(self, src_to_dst):
-        # type: (Iterable[Tuple[Text, Text]]) -> None
+        # type: (Iterable[Tuple[str, str]]) -> None
         for src, dst in src_to_dst:
             self._provenance[dst].append(src)
 
@@ -252,13 +305,13 @@ def _populate_flat_deps(
     distributions,  # type: Iterable[Distribution]
     symlink=False,  # type: bool
 ):
-    # type: (...) -> Iterator[Tuple[Text, Text]]
+    # type: (...) -> Iterator[Tuple[str, str]]
     for dist in distributions:
         try:
             installed_wheel = InstalledWheel.load(dist.location)
             for src, dst in installed_wheel.reinstall_flat(target_dir=dest_dir, symlink=symlink):
                 yield src, dst
-        except InstalledWheel.LoadError:
+        except LoadError:
             for src, dst in _populate_legacy_dist(
                 dest_dir=dest_dir, bin_dir=dest_dir, dist=dist, symlink=symlink
             ):
@@ -405,14 +458,14 @@ def _populate_legacy_dist(
     # those modules be mixed in. For sanity's sake, and since ~no dist provides more than
     # just 1 top-level module, we keep .pyc anchored to their associated dists when shared
     # and accept the cost of re-compiling top-level modules in each venv that uses them.
-    for src, dst in iter_copytree(
+    for src, dst in _copytree(
         src=dist.location, dst=dest_dir, exclude=("bin", "__pycache__"), symlink=symlink
     ):
         yield src, dst
 
     dist_bin_dir = os.path.join(dist.location, "bin")
     if os.path.isdir(dist_bin_dir):
-        for src, dst in iter_copytree(src=dist_bin_dir, dst=bin_dir, symlink=symlink):
+        for src, dst in _copytree(src=dist_bin_dir, dst=bin_dir, symlink=symlink):
             yield src, dst
 
 
@@ -424,7 +477,7 @@ def _populate_venv_deps(
     hermetic_scripts=True,  # type: bool
     top_level_source_packages=(),  # type: Iterable[str]
 ):
-    # type: (...) -> Iterator[Tuple[Text, Text]]
+    # type: (...) -> Iterator[Tuple[str, str]]
 
     # Since the pex distributions are all materialized to ~/.pex/installed_wheels, which we control,
     # we can optionally symlink to take advantage of sharing generated *.pyc files for auto-venvs
@@ -471,17 +524,11 @@ def _populate_venv_deps(
                 venv, symlink=symlink, rel_extra_path=rel_extra_path
             ):
                 yield src, dst
-        except InstalledWheel.LoadError:
-            try:
-                wheel = Wheel.load(dist.location)
-            except WheelMetadataLoadError:
-                site_packages_dir = venv.site_packages_dir
-            else:
-                site_packages_dir = venv.purelib if wheel.root_is_purelib else venv.platlib
+        except LoadError:
             dst = (
-                os.path.join(site_packages_dir, rel_extra_path)
+                os.path.join(venv.site_packages_dir, rel_extra_path)
                 if rel_extra_path
-                else site_packages_dir
+                else venv.site_packages_dir
             )
             for src, dst in _populate_legacy_dist(
                 dest_dir=dst, bin_dir=venv.bin_dir, dist=dist, symlink=symlink
@@ -539,18 +586,18 @@ def _populate_sources(
     pex,  # type: PEX
     dst,  # type: str
 ):
-    # type: (...) -> Iterator[Tuple[Text, Text]]
+    # type: (...) -> Iterator[Tuple[str, str]]
 
     # Since the pex.path() is ~always outside our control (outside ~/.pex), we copy all PEX user
     # sources into the venv.
     pex_sources = PEXSources.mount(pex)
-    for src, dest in iter_copytree(
+    for src, dst in _copytree(
         src=pex_sources.path,
         dst=dst,
         exclude=pex_sources.excludes,
         symlink=False,
     ):
-        yield src, dest
+        yield src, dst
 
 
 def _populate_first_party(
@@ -560,7 +607,7 @@ def _populate_first_party(
     venv_python,  # type: str
     bin_path,  # type: BinPath.Value
 ):
-    # type: (...) -> Iterator[Tuple[Text, Text]]
+    # type: (...) -> Iterator[Tuple[str, str]]
 
     # We want the venv at rest to reflect the PEX it was created from at rest; as such we use the
     # PEX's at-rest PEX-INFO to perform the layout. The venv can then be executed with various PEX
@@ -679,14 +726,11 @@ def _populate_first_party(
                     "PEX_PYTHON_PATH",
                     "PEX_VERBOSE",
                     "PEX_EMIT_WARNINGS",
-                    "PEX_MAX_INSTALL_JOBS",
                     # This is used by the vendoring system.
                     "__PEX_UNVENDORED__",
                     # These are _not_ used at runtime, but are present under testing / CI and
                     # simplest to add an exception for here and not warn about in CI runs.
-                    "_PEX_PEXPECT_TIMEOUT",
                     "_PEX_PIP_VERSION",
-                    "_PEX_REQUIRES_PYTHON",
                     "_PEX_TEST_DEV_ROOT",
                     "_PEX_TEST_PROJECT_DIR",
                     "_PEX_USE_PIP_CONFIG",
@@ -762,10 +806,7 @@ def _populate_first_party(
                                 "PEX_EXTRA_SYS_PATH"
                             )
                         del os.environ[key]
-  
-            for name, value in {inject_env!r}:
-                os.environ.setdefault(name, value)
-                
+
             pex_script = pex_overrides.get("PEX_SCRIPT") if pex_overrides else {script!r}
             if pex_script:
                 script_path = os.path.join(venv_bin_dir, pex_script)
@@ -778,61 +819,24 @@ def _populate_first_party(
                 if pex_interpreter
                 else pex_overrides.get("PEX_MODULE", {entry_point!r} or PEX_INTERPRETER_ENTRYPOINT)
             )
-                                  
+
             if entry_point == PEX_INTERPRETER_ENTRYPOINT:
                 # A Python interpreter always inserts the CWD at the head of the sys.path.
                 # See https://docs.python.org/3/library/sys.html#sys.path
                 sys.path.insert(0, "")
 
-                try:
+                if pex_interpreter_history:
+                    import atexit
                     import readline
-                except ImportError:
-                    if pex_interpreter_history:
-                        pex_warnings.warn(
-                            "PEX_INTERPRETER_HISTORY was requested which requires the `readline` "
-                            "module, but the current interpreter at {{python}} does not have readline "
-                            "support.".format(python=sys.executable)
-                        )
-                else:
-                    # This import is used for its side effects by the line below.
-                    import rlcompleter
 
-                    # N.B.: This hacky method of detecting use of libedit for the readline
-                    # implementation is the recommended means.
-                    # See https://docs.python.org/3/library/readline.html
-                    if "libedit" in readline.__doc__:
-                        # Mac can use libedit, and libedit has different config syntax.
-                        readline.parse_and_bind("bind ^I rl_complete")
-                    else:
-                        readline.parse_and_bind("tab: complete")
-
+                    histfile = os.path.expanduser(pex_interpreter_history_file)
                     try:
-                        # Under current PyPy readline does not implement read_init_file and emits a
-                        # warning; so we squelch that noise.
-                        import warnings
-
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            readline.read_init_file()
-                    except (IOError, OSError):
-                        # No init file (~/.inputrc for readline or ~/.editrc for libedit).
+                        readline.read_history_file(histfile)
+                        readline.set_history_length(1000)
+                    except OSError:
                         pass
 
-                    if pex_interpreter_history:
-                        import atexit
-
-                        histfile = os.path.expanduser(pex_interpreter_history_file)
-                        try:
-                            readline.read_history_file(histfile)
-                            readline.set_history_length(1000)
-                        except (IOError, OSError) as e:
-                            sys.stderr.write(
-                                "Failed to read history file at {{path}} due to: {{err}}\\n".format(
-                                    path=histfile, err=e
-                                )
-                            )
-
-                        atexit.register(readline.write_history_file, histfile)
+                    atexit.register(readline.write_history_file, histfile)
 
             if entry_point == PEX_INTERPRETER_ENTRYPOINT and len(sys.argv) > 1:
                 args = sys.argv[1:]
@@ -903,6 +907,8 @@ def _populate_first_party(
                     sys.exit(0)
 
             if not is_exec_override:
+                for name, value in {inject_env!r}:
+                    os.environ.setdefault(name, value)
                 sys.argv[1:1] = {inject_args!r}
 
             module_name, _, function = entry_point.partition(":")

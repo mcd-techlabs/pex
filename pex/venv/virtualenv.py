@@ -1,4 +1,4 @@
-# Copyright 2020 Pex project contributors.
+# Copyright 2020 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -9,7 +9,6 @@ import pkgutil
 import re
 import shutil
 import sys
-from collections import defaultdict
 from contextlib import closing
 from fileinput import FileInput
 from textwrap import dedent
@@ -20,14 +19,7 @@ from pex.compatibility import commonpath, get_stdout_bytes_buffer
 from pex.dist_metadata import Distribution, find_distributions
 from pex.executor import Executor
 from pex.fetcher import URLFetcher
-from pex.interpreter import (
-    Platlib,
-    Purelib,
-    PythonInterpreter,
-    PyVenvCfg,
-    SitePackagesDir,
-    create_shebang,
-)
+from pex.interpreter import PythonInterpreter, PyVenvCfg
 from pex.orderedset import OrderedSet
 from pex.tracer import TRACER
 from pex.typing import TYPE_CHECKING, cast
@@ -36,7 +28,8 @@ from pex.variables import ENV
 from pex.version import __version__
 
 if TYPE_CHECKING:
-    from typing import DefaultDict, Iterator, Optional, Tuple, Type, Union
+    from typing import Iterator, Optional, Tuple, Union
+
 
 logger = logging.getLogger(__name__)
 
@@ -89,53 +82,39 @@ class InvalidVirtualenvError(Exception):
     """Indicates a virtualenv is malformed."""
 
 
-def _find_preferred_site_packages_dir(
+def find_site_packages_dir(
     venv_dir,  # type: str
     interpreter=None,  # type: Optional[PythonInterpreter]
 ):
     # type: (...) -> str
 
     real_venv_dir = os.path.realpath(venv_dir)
-    site_packages_dirs_by_type = defaultdict(
-        OrderedSet
-    )  # type: DefaultDict[Type[SitePackagesDir], OrderedSet[SitePackagesDir]]
+    site_packages_dirs = OrderedSet()  # type: OrderedSet[str]
 
     interpreter = interpreter or PythonInterpreter.get()
-    for entry in interpreter.site_packages:
-        if commonpath((real_venv_dir, entry.path)) != real_venv_dir:
+    for entry in interpreter.sys_path:
+        real_entry_path = os.path.realpath(entry)
+        if commonpath((real_venv_dir, real_entry_path)) != real_venv_dir:
             # This ignores system site packages when the venv is built with --system-site-packages.
             continue
-        if os.path.isdir(entry.path):
-            site_packages_dirs_by_type[type(entry)].add(entry)
+        if "site-packages" == os.path.basename(real_entry_path) and os.path.isdir(real_entry_path):
+            site_packages_dirs.add(real_entry_path)
 
-    if not site_packages_dirs_by_type:
+    if not site_packages_dirs:
         raise InvalidVirtualenvError(
             "The virtualenv at {venv_dir} is not valid. No site-packages directory was found in "
             "its sys.path:\n{sys_path}".format(
                 venv_dir=venv_dir, sys_path="\n".join(interpreter.sys_path)
             )
         )
-
-    for site_packages_dir_type in Purelib, Platlib, SitePackagesDir:
-        site_packages_dirs = site_packages_dirs_by_type.get(site_packages_dir_type)
-        if not site_packages_dirs:
-            continue
-        if len(site_packages_dirs) > 1:
-            raise InvalidVirtualenvError(
-                "The virtualenv at {venv_dir} is not valid. It has more than one {dir_type} "
-                "directory:\n{site_packages}".format(
-                    venv_dir=venv_dir,
-                    dir_type=site_packages_dir_type,
-                    site_packages="\n".join(entry.path for entry in site_packages_dirs),
-                )
+    if len(site_packages_dirs) > 1:
+        raise InvalidVirtualenvError(
+            "The virtualenv at {venv_dir} is not valid. It has more than one site-packages "
+            "directory:\n{site_packages}".format(
+                venv_dir=venv_dir, site_packages="\n".join(site_packages_dirs)
             )
-        return site_packages_dirs.pop().path
-
-    raise InvalidVirtualenvError(
-        "Could not determine the site-packages directory for the venv at {venv_dir}.".format(
-            venv_dir=venv_dir
         )
-    )
+    return site_packages_dirs.pop()
 
 
 class Virtualenv(object):
@@ -145,14 +124,11 @@ class Virtualenv(object):
     def enclosing(cls, python):
         # type: (Union[str, PythonInterpreter]) -> Optional[Virtualenv]
         """Return the virtual environment the given python interpreter is enclosed in."""
-        if isinstance(python, PythonInterpreter):
-            interpreter = python
-        else:
-            try:
-                interpreter = PythonInterpreter.from_binary(python)
-            except PythonInterpreter.Error:
-                return None
-
+        interpreter = (
+            python
+            if isinstance(python, PythonInterpreter)
+            else PythonInterpreter.from_binary(python)
+        )
         if not interpreter.is_venv:
             return None
         return cls(
@@ -184,7 +160,7 @@ class Virtualenv(object):
             interpreter = base_interpreter
 
         # Guard against API calls from environment with ambient PYTHONPATH preventing pip virtualenv
-        # creation. See: https://github.com/pex-tool/pex/issues/1451
+        # creation. See: https://github.com/pantsbuild/pex/issues/1451
         env = os.environ.copy()
         pythonpath = env.pop("PYTHONPATH", None)
         if pythonpath:
@@ -197,7 +173,9 @@ class Virtualenv(object):
 
         custom_prompt = None  # type: Optional[str]
         py_major_minor = interpreter.version[:2]
-        if py_major_minor[0] == 2 or (interpreter.is_pypy and py_major_minor[:2] <= (3, 7)):
+        if py_major_minor[0] == 2 or (
+            interpreter.identity.interpreter == "PyPy" and py_major_minor[:2] <= (3, 7)
+        ):
             # N.B.: PyPy3.6 and PyPy3.7 come equipped with a venv module but it does not seem to
             # work.
             virtualenv_py = pkgutil.get_data(
@@ -274,28 +252,6 @@ class Virtualenv(object):
         )
         for script in virtualenv._rewrite_base_scripts(real_venv_dir=venv_dir.target_dir):
             TRACER.log("Re-writing {}".format(script))
-
-        # It's known that PyPy's 7.3.14 releases create venvs with absolute symlinks in bin/ to
-        # bin/ local files, which leaves invalid symlinks to the atomic workdir. We fix that up
-        # here. See: https://github.com/pypy/pypy/issues/4838
-        for path in os.listdir(virtualenv.bin_dir):
-            abs_path = os.path.join(virtualenv.bin_dir, path)
-            if not os.path.islink(abs_path):
-                continue
-            link_target = os.readlink(abs_path)
-            if not os.path.isabs(link_target):
-                continue
-            if virtualenv.bin_dir == commonpath((virtualenv.bin_dir, link_target)):
-                rel_dst = os.path.relpath(link_target, virtualenv.bin_dir)
-                TRACER.log(
-                    "Replacing absolute symlink {src} -> {dst} with relative symlink".format(
-                        src=abs_path, dst=link_target
-                    ),
-                    V=3,
-                )
-                os.unlink(abs_path)
-                os.symlink(rel_dst, abs_path)
-
         return virtualenv
 
     def __init__(
@@ -311,22 +267,14 @@ class Virtualenv(object):
         python_exe_path = os.path.join(self._bin_dir, python_exe_name)
         try:
             self._interpreter = PythonInterpreter.from_binary(python_exe_path)
-        except PythonInterpreter.Error as e:
+        except PythonInterpreter.InterpreterNotFound as e:
             raise InvalidVirtualenvError(
                 "The virtualenv at {venv_dir} is not valid. Failed to load an interpreter at "
                 "{python_exe_path}: {err}".format(
                     venv_dir=self._venv_dir, python_exe_path=python_exe_path, err=e
                 )
             )
-        self._site_packages_dir = _find_preferred_site_packages_dir(venv_dir, self._interpreter)
-        self._purelib = self._site_packages_dir
-        self._platlib = self._site_packages_dir
-        for entry in self._interpreter.site_packages:
-            if isinstance(entry, Purelib):
-                self._purelib = entry.path
-            elif isinstance(entry, Platlib):
-                self._platlib = entry.path
-
+        self._site_packages_dir = find_site_packages_dir(venv_dir, self._interpreter)
         self._base_bin = frozenset(_iter_files(self._bin_dir))
         self._sys_path = None  # type: Optional[Tuple[str, ...]]
 
@@ -379,16 +327,6 @@ class Virtualenv(object):
         return self._site_packages_dir
 
     @property
-    def purelib(self):
-        # type: () -> str
-        return self._purelib
-
-    @property
-    def platlib(self):
-        # type: () -> str
-        return self._platlib
-
-    @property
     def interpreter(self):
         # type: () -> PythonInterpreter
         return self._interpreter
@@ -402,13 +340,16 @@ class Virtualenv(object):
     @property
     def sys_path(self):
         # type: () -> Tuple[str, ...]
-        return self.interpreter.sys_path
+        if self._sys_path is None:
+            _, stdout, _ = self.interpreter.execute(
+                args=["-c", "import os, sys; print(os.linesep.join(sys.path))"]
+            )
+            self._sys_path = tuple(stdout.strip().splitlines())
+        return self._sys_path
 
-    def iter_distributions(self, rescan=False):
-        # type: (bool) -> Iterator[Distribution]
-        for dist in find_distributions(
-            search_path=[entry.path for entry in self._interpreter.site_packages], rescan=rescan
-        ):
+    def iter_distributions(self):
+        # type: () -> Iterator[Distribution]
+        for dist in find_distributions(search_path=self._interpreter.site_packages):
             yield dist
 
     def _rewrite_base_scripts(self, real_venv_dir):
@@ -447,10 +388,12 @@ class Virtualenv(object):
                 for line in fi:
                     buffer = get_stdout_bytes_buffer()
                     if fi.isfirstline():
-                        shebang = create_shebang(
-                            python_exe=python or self._interpreter.binary, python_args=python_args
+                        shebang = [python or self._interpreter.binary]
+                        if python_args:
+                            shebang.append(python_args)
+                        buffer.write(
+                            "#!{shebang}\n".format(shebang=" ".join(shebang)).encode("utf-8")
                         )
-                        buffer.write("{shebang}\n".format(shebang=shebang).encode("utf-8"))
                         yield fi.filename()
                     else:
                         # N.B.: These lines include the newline already.

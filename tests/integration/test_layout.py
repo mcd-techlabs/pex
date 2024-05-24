@@ -1,4 +1,4 @@
-# Copyright 2021 Pex project contributors.
+# Copyright 2021 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 import os
@@ -9,10 +9,8 @@ import pytest
 
 from pex.common import safe_open, safe_rmtree
 from pex.layout import Layout
-from pex.pep_427 import InstallableType
 from pex.typing import TYPE_CHECKING
 from testing import run_pex_command
-from testing.pep_427 import get_installable_type_flag
 
 if TYPE_CHECKING:
     from typing import Any, List
@@ -24,18 +22,10 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     "layout", [pytest.param(layout, id=layout.value) for layout in Layout.values()]
 )
-@pytest.mark.parametrize(
-    "installable_type",
-    [
-        pytest.param(installable_type, id=installable_type.value)
-        for installable_type in InstallableType.values()
-    ],
-)
 def test_resiliency(
     tmpdir,  # type: Any
     execution_mode_args,  # type: List[str]
     layout,  # type: Layout.Value
-    installable_type,  # type: InstallableType.Value
 ):
     # type: (...) -> None
     src_dir = os.path.join(str(tmpdir), "src")
@@ -60,7 +50,6 @@ def test_resiliency(
             pex_app,
             "--layout",
             layout.value,
-            get_installable_type_flag(installable_type),
         ]
         + execution_mode_args
     ).assert_success()

@@ -1,4 +1,4 @@
-# Copyright 2022 Pex project contributors.
+# Copyright 2022 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 from __future__ import absolute_import
@@ -185,7 +185,8 @@ def load_build_system(
             interpreter=target.get_interpreter(),
             requires=build_system_table.requires,
             resolved=tuple(
-                resolved_distribution.distribution for resolved_distribution in result.distributions
+                installed_distribution.distribution
+                for installed_distribution in result.installed_distributions
             ),
             build_backend=build_system_table.build_backend,
             backend_path=build_system_table.backend_path,
