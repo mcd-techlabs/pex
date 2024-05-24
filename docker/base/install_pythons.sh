@@ -8,23 +8,23 @@ export PYENV_ROOT=/pyenv
 # N.B.: The 1st listed version will supply the default `python` on the PATH; otherwise order does
 # not matter.
 PYENV_VERSIONS=(
-  3.11.9
+  3.11.8
   2.7.18
   3.5.10
   3.6.15
   3.7.17
-  3.8.19
-  3.9.19
-  3.10.14
-  3.12.3
-  3.13.0b1
-  pypy2.7-7.3.16
+  3.8.18
+  3.9.18
+  3.10.13
+  3.12.2
+  3.13.0a5
+  pypy2.7-7.3.15
   pypy3.5-7.0.0
   pypy3.6-7.3.3
   pypy3.7-7.3.9
   pypy3.8-7.3.11
-  pypy3.9-7.3.16
-  pypy3.10-7.3.16
+  pypy3.9-7.3.15
+  pypy3.10-7.3.15
 )
 git clone "${PYENV_REPO:-https://github.com/pyenv/pyenv.git}" "${PYENV_ROOT}" && (
   cd "${PYENV_ROOT}" && git checkout "${PYENV_SHA:-HEAD}" && src/configure && make -C src
